@@ -10,7 +10,7 @@
 ## Possible and should be implemented
 
 * Anchors
-* Character class inversion
+* Character property inversion
 * Character set inversion
 * Character set composition
 * Case-insensitive mode
