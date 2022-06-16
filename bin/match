@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "bundler/setup"
+
+$:.unshift(File.expand_path("../lib", __dir__))
+require "exreg"
+
+source = "a+"
+native = /#{source}/
+pattern = Exreg::Pattern.new(source)
+
+ast = pattern.ast
+nfa = pattern.nfa
+dfa = pattern.dfa
+
+puts source
+pp ast
+puts Exreg::DiGraph.call(nfa.start_state, "build/nfa.svg")
+puts Exreg::DiGraph.call(dfa.start_state, "build/dfa.svg")
+
+format = "%-10s %-10s %-10s %-10s"
+puts format % ["Input", "Native", "NFA", "DFA"]
+
+["a", "aa", "aaa", "b", "bb", "ab", "aab", "aaacab"].each do |string|
+  puts format % [string, native.match?(string), nfa.match?(string), dfa.match?(string)]
+end

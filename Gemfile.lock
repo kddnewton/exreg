@@ -1,0 +1,35 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    docile (1.4.0)
+    ffi (1.15.5)
+    graphviz (1.2.1)
+      process-pipeline
+    minitest (5.15.0)
+    process-group (1.2.4)
+      process-terminal (~> 0.2.0)
+    process-pipeline (1.0.2)
+      process-group
+    process-terminal (0.2.0)
+      ffi
+    rake (13.0.6)
+    rubyzip (2.3.2)
+    simplecov (0.21.2)
+      docile (~> 1.1)
+      simplecov-html (~> 0.11)
+      simplecov_json_formatter (~> 0.1)
+    simplecov-html (0.12.3)
+    simplecov_json_formatter (0.1.4)
+
+PLATFORMS
+  x86_64-darwin-21
+
+DEPENDENCIES
+  graphviz
+  minitest
+  rake
+  rubyzip
+  simplecov
+
+BUNDLED WITH
+   2.3.6
