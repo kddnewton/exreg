@@ -28,3 +28,10 @@
   * [Recheck](https://makenowjust-labs.github.io/recheck/docs/internals/background/)
   * [Rust](https://github.com/rust-lang/regex/blob/master/HACKING.md)
     * [PR for lazy DFAs](https://github.com/rust-lang/regex/pull/164)
+* Other
+  * [DFA minimization](https://en.wikipedia.org/wiki/DFA_minimization)
+  * [NFA minimization](https://www.researchgate.net/publication/3045459_On_the_State_Minimization_of_Nondeterministic_Finite_Automata)
+  * [Lazy DFAs](http://wwwmayr.informatik.tu-muenchen.de/lehre/2014WS/afs/2014-11-14.pdf)
+  * [TruffleRuby regexp analyzer](https://github.com/Shopify/truffleruby-utils/tree/master/regexp-analyzer)
+  * [Practical Experience with TRegex and Ruby](https://www.youtube.com/watch?v=0a73au-sbTM)
+  * [Optimizing based on source encoding in graal](https://github.com/oracle/graal/pull/3806)
