@@ -31,6 +31,44 @@ module Exreg
       end
     end
 
+    # This represents a property that can be queried. Until it's _actually_
+    # queried we don't want to have to read the file that contains all of the
+    # codepoints.
+    class LazyProperty
+      attr_reader :filename, :entries
+
+      def initialize(filename)
+        @filename = filename
+        @entries = nil
+      end
+
+      def [](key)
+        value = (entries || read)[key]
+        return nil unless value
+
+        value.split(",").map do |entry|
+          if entry =~ /\A(\d+)\.\.(\d+)\z/
+            Range.new(min: $1.to_i, max: $2.to_i)
+          else
+            Value.new(value: entry.to_i)
+          end
+        end
+      end
+
+      private
+
+      # Read through the file and cache each of the entries.
+      def read
+        @entries = {}
+        File.foreach(File.join(CACHE_DIRECTORY, filename), chomp: true) do |line|
+          _, name, items = *line.match(/\A(.+?)\s+(.+)\z/)
+          @entries[name.downcase] = items
+        end
+
+        @entries
+      end
+    end
+
     # This class represents the cache of all of the expressions that we have
     # previously calculated within the \p{} syntax. We use this cache to quickly
     # efficiently craft transitions between states using properties.
@@ -39,14 +77,14 @@ module Exreg
                   :miscellaneous, :property, :script, :script_extension
 
       def initialize
-        @age = read_file("age.txt")
-        @block = read_file("block.txt")
-        @core_property = read_file("core_property.txt")
-        @general_category = read_file("general_category.txt")
-        @miscellaneous = read_file("miscellaneous.txt")
-        @property = read_file("property.txt")
-        @script_extension = read_file("script.txt")
-        @script = read_file("script.txt")
+        @age = LazyProperty.new("age.txt")
+        @block = LazyProperty.new("block.txt")
+        @core_property = LazyProperty.new("core_property.txt")
+        @general_category = LazyProperty.new("general_category.txt")
+        @miscellaneous = LazyProperty.new("miscellaneous.txt")
+        @property = LazyProperty.new("property.txt")
+        @script_extension = LazyProperty.new("script.txt")
+        @script = LazyProperty.new("script.txt")
       end
 
       # When you look up an entry using [], it's going to lazily convert each of
@@ -55,15 +93,7 @@ module Exreg
       # properties are not going to end up being used.
       def [](property)
         key, value = property.downcase.split("=", 2)
-        entry = value ? find_key_value(key, value) : find_key(key)
-
-        entry.split(",").map do |entry|
-          if entry =~ /\A(\d+)\.\.(\d+)\z/
-            Range.new(min: $1.to_i, max: $2.to_i)
-          else
-            Value.new(value: entry.to_i)
-          end
-        end
+        value ? find_key_value(key, value) : find_key(key)
       end
 
       private
@@ -92,15 +122,6 @@ module Exreg
             property[key]
           else
             raise
-          end
-        end
-      end
-
-      def read_file(filename)
-        {}.tap do |entries|
-          File.foreach(File.join(CACHE_DIRECTORY, filename), chomp: true) do |line|
-            _, name, items = *line.match(/\A(.+?)\s+(.+)\z/)
-            entries[name.downcase] = items
           end
         end
       end
