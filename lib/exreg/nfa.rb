@@ -24,12 +24,16 @@ module Exreg
         end
       end
 
-      # Connect this state to another state through a transition.
+      # Connect this state to another state through a transition. This adds the
+      # transition to the start of the list.
       def connect_to(transition, state)
         transitions.unshift([transition, state])
       end
 
-      # Connect this state to another state through an epsilon transition.
+      # Connect this state to another state through an epsilon transition. This
+      # adds the epsilon transition to the end of the list. This means by
+      # default patterns will be greedy (since they will attempt to match the
+      # epsilon transition after all other transitions have failed).
       def epsilon_to(state)
         transitions.push([EpsilonTransition.new, state])
       end
@@ -110,7 +114,9 @@ module Exreg
       end
     end
 
-    # This class compiles an AST into an NFA.
+    # This class compiles an AST into an NFA. It is an implementation of the
+    # Thompson's construction algorithm. For more information, see the paper:
+    # https://dl.acm.org/doi/10.1145/363347.363387.
     class Compiler
       attr_reader :labels, :encoder, :unicode
 

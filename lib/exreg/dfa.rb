@@ -81,7 +81,18 @@ module Exreg
       end
     end
 
-    # This class is responsible for compiling an NFA into a DFA.
+    # This class is responsible for compiling an NFA into a DFA. It does this
+    # through a process called powerset construction or subset construction.
+    #
+    # The general idea is to eagerly walk through the state machine and simulate
+    # each possible input at the epsilon-closure of each state. (The
+    # epsilon-closure of a state is the set of states that can be reached from
+    # that state by following epsilon transitions.) Then, each set of states
+    # reached by each transition is a new state in the DFA.
+    #
+    # Note that doing this eagerly has its drawbacks. For an NFA of n states,
+    # the worst-case corresponding DFA could have as many as 2^n states. This
+    # can be impractical for large NFAs.
     class Compiler
       attr_reader :labels
 
@@ -89,16 +100,6 @@ module Exreg
         @labels = ("1"..).each
       end
 
-      # This method converts a non-deterministic finite automata into a
-      # deterministic finite automata. The best link I could find that describes
-      # the general approach taken here is here:
-      #
-      #     https://www.geeksforgeeks.org/conversion-from-nfa-to-dfa/
-      #
-      # The general idea is to walk the state machine and make it such that
-      # for any given state and input you deterministically know which state the
-      # machine should transition to. In effect, this means we're removing all
-      # epsilon transitions.
       def call(start)
         compiled = State.new(label: labels.next, states: expand([start]))
 
