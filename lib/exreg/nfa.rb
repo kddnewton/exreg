@@ -9,10 +9,10 @@ module Exreg
     class State
       attr_reader :label, :transitions
 
-      def initialize(label:, transitions: {}, final: false)
+      def initialize(label:, final: false)
         @label = label
-        @transitions = transitions
         @final = final
+        @transitions = []
       end
 
       def <=>(other)
@@ -24,8 +24,14 @@ module Exreg
         end
       end
 
-      def connect(transition, state)
-        @transitions[transition] = state
+      # Connect this state to another state through a transition.
+      def connect_to(transition, state)
+        transitions.unshift([transition, state])
+      end
+
+      # Connect this state to another state through an epsilon transition.
+      def epsilon_to(state)
+        transitions.push([EpsilonTransition.new, state])
       end
 
       def final?
@@ -133,8 +139,22 @@ module Exreg
                 RangeTransition.new(from: min_bytes[index], to: max_bytes[index])
               end
 
-            states[index].connect(transition, states[index + 1])
+            states[index].connect_to(transition, states[index + 1])
           end
+        end
+      end
+
+      # This represents a unit of work to be performed by the compiler. It is
+      # used as a replacement to what would be a recursive method call in order
+      # to linearize the compilation process. We do this for performance and so
+      # that we aren't limited by the size of the Ruby call stack.
+      class Connection
+        attr_reader :node, :from, :to
+
+        def initialize(node, from, to)
+          @node = node
+          @from = from
+          @to = to
         end
       end
 
@@ -147,9 +167,90 @@ module Exreg
 
       def call(pattern)
         start = State.new(label: "START")
-        finish = State.new(label: "FINISH", final: true)
+        queue = [Connection.new(pattern, start, State.new(label: "FINISH", final: true))]
 
-        connect(pattern, start, finish)
+        while (connection = queue.shift)
+          case connection.node
+          in AST::Expression[items:]
+            inner = Array.new(items.length - 1) { State.new(label: labels.next) }
+            states = [connection.from, *inner, connection.to]
+  
+            items.each_with_index do |item, index|
+              queue << Connection.new(item, states[index], states[index + 1])
+            end
+          in AST::Group[expressions:]
+            expressions.each do |expression|
+              queue << Connection.new(expression, connection.from, connection.to)
+            end
+          in AST::MatchAny
+            connect_any(connection.from, connection.to)
+          in AST::MatchCharacter[value:]
+            connect_value(value.ord, connection.from, connection.to)
+          in AST::MatchClass[name: :digit]
+            connect_range("0".ord, "9".ord, connection.from, connection.to)
+          in AST::MatchClass[name: :hex]
+            connect_range("0".ord, "9".ord, connection.from, connection.to)
+            connect_range("A".ord, "F".ord, connection.from, connection.to)
+            connect_range("a".ord, "f".ord, connection.from, connection.to)
+          in AST::MatchClass[name: :space]
+            connect_range("\t".ord, "\r".ord, connection.from, connection.to)
+            connect_value(" ".ord, connection.from, connection.to)
+          in AST::MatchClass[name: :word]
+            connect_range("0".ord, "9".ord, connection.from, connection.to)
+            connect_value("_".ord, connection.from, connection.to)
+            connect_range("A".ord, "Z".ord, connection.from, connection.to)
+            connect_range("a".ord, "z".ord, connection.from, connection.to)
+          in AST::MatchProperty[value:]
+            unicode[value].each do |entry|
+              case entry
+              in Unicode::Range[min:, max:]
+                connect_range(min, max, connection.from, connection.to)
+              in Unicode::Value[value:]
+                connect_value(value, connection.from, connection.to)
+              end
+            end
+          in AST::MatchRange[from:, to:]
+            connect_range(from.ord, to.ord, connection.from, connection.to)
+          in AST::MatchSet[items:]
+            items.each do |item|
+              queue << Connection.new(item, connection.from, connection.to)
+            end
+          in AST::Pattern[expressions:]
+            expressions.each do |expression|
+              queue << Connection.new(expression, connection.from, connection.to)
+            end
+          in AST::Quantified[item:, quantifier: AST::OptionalQuantifier]
+            queue << Connection.new(item, connection.from, connection.to)
+            connection.from.epsilon_to(connection.to)
+          in AST::Quantified[item:, quantifier: AST::PlusQuantifier]
+            queue << Connection.new(item, connection.from, connection.to)
+            connection.to.epsilon_to(connection.from)
+          in AST::Quantified[item:, quantifier: AST::RangeQuantifier[minimum:, maximum: nil]]
+            inner = minimum == 0 ? [] : Array.new(minimum - 1) { State.new(label: labels.next) }
+            states = [connection.from, *inner, connection.to]
+  
+            minimum.times do |index|
+              queue << Connection.new(item, states[index], states[index + 1])
+            end
+  
+            states[-1].epsilon_to(states[-2])
+          in AST::Quantified[item:, quantifier: AST::RangeQuantifier[minimum:, maximum:]]
+            inner = maximum == 0 ? [] : Array.new(maximum - 1) { State.new(label: labels.next) }
+            states = [connection.from, *inner, connection.to]
+  
+            maximum.times do |index|
+              queue << Connection.new(item, states[index], states[index + 1])
+            end
+  
+            (maximum - minimum).times do |index|
+              states[minimum + index].epsilon_to(connection.to)
+            end
+          in AST::Quantified[item:, quantifier: AST::StarQuantifier]
+            queue << Connection.new(item, connection.from, connection.from)
+            connection.from.epsilon_to(connection.to)
+          end
+        end
+
         start
       end
 
@@ -178,88 +279,6 @@ module Exreg
       def connect_any(from, to)
         connector = Connector.new(from: from, to: to, labels: labels)
         UTF8::Encoder.new(connector).connect_any
-      end
-
-      # This takes a node in the AST and two states in the NFA and creates
-      # whatever transitions it needs to between the two states.
-      def connect(node, from, to)
-        case node
-        in AST::Expression[items: items]
-          inner = Array.new(items.length - 1) { State.new(label: labels.next) }
-          states = [from, *inner, to]
-
-          items.each_with_index do |item, index|
-            connect(item, states[index], states[index + 1])
-          end
-        in AST::Group
-          node.expressions.each do |expression|
-            connect(expression, from, to)
-          end
-        in AST::MatchAny
-          connect_any(from, to)
-        in AST::MatchCharacter[value: value]
-          connect_value(value.ord, from, to)
-        in AST::MatchClass[name: :digit]
-          connect_range("0".ord, "9".ord, from, to)
-        in AST::MatchClass[name: :hex]
-          connect_range("0".ord, "9".ord, from, to)
-          connect_range("A".ord, "F".ord, from, to)
-          connect_range("a".ord, "f".ord, from, to)
-        in AST::MatchClass[name: :space]
-          connect_range("\t".ord, "\r".ord, from, to)
-          connect_value(" ".ord, from, to)
-        in AST::MatchClass[name: :word]
-          connect_range("0".ord, "9".ord, from, to)
-          connect_value("_".ord, from, to)
-          connect_range("A".ord, "Z".ord, from, to)
-          connect_range("a".ord, "z".ord, from, to)
-        in AST::MatchProperty[value:]
-          unicode[value].each do |entry|
-            case entry
-            in Unicode::Range[min:, max:]
-              connect_range(min, max, from, to)
-            in Unicode::Value[value:]
-              connect_value(value, from, to)
-            end
-          end
-        in AST::MatchRange[from: min, to: max]
-          connect_range(min.ord, max.ord, from, to)
-        in AST::MatchSet[items:]
-          items.each { |item| connect(item, from, to) }
-        in AST::Pattern[expressions: expressions]
-          expressions.each do |expression|
-            connect(expression, from, to)
-          end
-        in AST::Quantified[item: item, quantifier: AST::OptionalQuantifier]
-          connect(item, from, to)
-          from.connect(EpsilonTransition.new, to)
-        in AST::Quantified[item: item, quantifier: AST::PlusQuantifier]
-          connect(item, from, to)
-          to.connect(EpsilonTransition.new, from)
-        in AST::Quantified[item: item, quantifier: AST::RangeQuantifier[minimum:, maximum: Float::INFINITY]]
-          inner = minimum == 0 ? [] : Array.new(minimum - 1) { State.new(label: labels.next) }
-          states = [from, *inner, to]
-
-          minimum.times do |index|
-            connect(item, states[index], states[index + 1])
-          end
-
-          states[-1].connect(EpsilonTransition.new, states[-2])
-        in AST::Quantified[item: item, quantifier: AST::RangeQuantifier[minimum:, maximum:]]
-          inner = maximum == 0 ? [] : Array.new(maximum - 1) { State.new(label: labels.next) }
-          states = [from, *inner, to]
-
-          maximum.times do |index|
-            connect(item, states[index], states[index + 1])
-          end
-
-          (maximum - minimum).times do |index|
-            states[minimum + index].connect(EpsilonTransition.new, to)
-          end
-        in AST::Quantified[item: item, quantifier: AST::StarQuantifier]
-          connect(item, from, from)
-          from.connect(EpsilonTransition.new, to)
-        end
       end
     end
 

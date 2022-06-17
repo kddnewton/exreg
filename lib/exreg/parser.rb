@@ -316,7 +316,7 @@ module Exreg
           in [:maximum, { type: :rbrace, location: end_location }]
             return AST::RangeQuantifier.new(
               minimum: minimum_digits.empty? ? 0 : minimum_digits.join.to_i,
-              maximum: maximum_digits.empty? ? Float::INFINITY : maximum_digits.join.to_i,
+              maximum: maximum_digits.empty? ? nil : maximum_digits.join.to_i,
               location: start_location.to(end_location)
             )
           else

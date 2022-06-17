@@ -59,7 +59,7 @@ module Exreg
       parse("a{3,}") => AST::Pattern[AST::Expression[
         AST::Quantified[
           AST::MatchCharacter[value: "a"],
-          AST::RangeQuantifier[minimum: 3, maximum: Float::INFINITY]
+          AST::RangeQuantifier[minimum: 3, maximum: nil]
         ]
       ]]
     end
