@@ -10,7 +10,8 @@ require_relative "exreg/flags"
 require_relative "exreg/nfa"
 require_relative "exreg/parser"
 require_relative "exreg/unicode"
-require_relative "exreg/utf8"
+
+require_relative "exreg/encoding/utf8"
 
 module Exreg
   # This is the main class that represents a regular expression. It effectively
