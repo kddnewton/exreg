@@ -77,14 +77,17 @@ module Exreg
       # Visit a MatchSet node.
       alias visit_match_set visit_child_nodes
 
-      # Visit a Pattern node.
-      alias visit_pattern visit_child_nodes
-
       # Visit an OptionalQuantifier node.
       alias visit_optional_quantifier visit_child_nodes
 
+      # Visit a Pattern node.
+      alias visit_pattern visit_child_nodes
+
       # Visit a PlusQuantifier node.
       alias visit_plus_quantifier visit_child_nodes
+
+      # Visit a POSIXClass node.
+      alias visit_posix_class visit_child_nodes
 
       # Visit a Quantified node.
       alias visit_quantified visit_child_nodes
@@ -178,6 +181,14 @@ module Exreg
         token("pattern") do
           q.breakable
           q.seplist(node.expressions) { |expression| q.pp(expression) }
+        end
+      end
+
+      # Visit a POSIXClass node.
+      def visit_posix_class(node)
+        token("posix-class") do
+          q.breakable
+          q.text(node.name.to_s)
         end
       end
 
@@ -502,6 +513,30 @@ module Exreg
 
       def deconstruct_keys(keys)
         { location: location }
+      end
+    end
+
+    # This is a POSIX character class.
+    class POSIXClass < Node
+      attr_reader :name, :location
+
+      def initialize(name:, location:)
+        @name = name
+        @location = location
+      end
+
+      def accept(visitor)
+        visitor.visit_posix_class(self)
+      end
+
+      def child_nodes
+        []
+      end
+
+      alias deconstruct child_nodes
+
+      def deconstruct_keys(keys)
+        { name: name, location: location }
       end
     end
 

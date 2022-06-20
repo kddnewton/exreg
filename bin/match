@@ -6,7 +6,7 @@ require "bundler/setup"
 $:.unshift(File.expand_path("../lib", __dir__))
 require "exreg"
 
-source = "a*"
+source = "[[:ascii:]]"
 native = /#{source}/
 pattern = Exreg::Pattern.new(source)
 

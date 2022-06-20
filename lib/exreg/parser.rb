@@ -132,7 +132,7 @@ module Exreg
       item =
         case tokens.peek
         in { type: :lbracket }
-          parse_character_set(tokens)
+          parse_lbracket(tokens)
         in { type: :backslash }
           parse_escaped(tokens)
         in { type: :char | :lbrace | :rbrace, value:, location: }
@@ -157,10 +157,41 @@ module Exreg
       item
     end
 
-    # This creates an AST::MatchSet, which contains a list of
-    # AST::MatchCharacter and AST::MatchRange objects.
-    def parse_character_set(tokens)
+    # This creates either an AST::POSIXClass or an AST::MatchSet.
+    def parse_lbracket(tokens)
       tokens.next => { type: :lbracket, location: slocation }
+
+      if tokens.peek in { type: :lbracket }
+        parse_posix_class(tokens, slocation)
+      else
+        parse_character_set(tokens, slocation)
+      end
+    end
+
+    # This creates an AST::POSIXClass.
+    def parse_posix_class(tokens, slocation)
+      tokens.next => { type: :lbracket }
+      tokens.next => { type: :char, value: ":" }
+
+      name = +""
+      loop do
+        case tokens.next
+        in { type: :char, value: ":" }
+          break
+        in { type: :char, value: }
+          name << value
+        end
+      end
+
+      tokens.next => { type: :rbracket }
+      tokens.next => { type: :rbracket, location: elocation }
+
+      AST::POSIXClass.new(name: name.downcase.to_sym, location: slocation.to(elocation))
+    end
+
+    # This creates an AST::MatchSet which contains a list of AST::MatchCharacter
+    # and AST::MatchRange objects.
+    def parse_character_set(tokens, slocation)
       items = []
 
       loop do

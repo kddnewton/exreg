@@ -3,7 +3,6 @@
 ## Hard (impossible?) to implement in a DFA
 
 * Non-greedy repetition (`*?`, `+?`)
-* Capturing
 * Subexpression calls
 * Assertions (lookahead/lookbehind)
 
@@ -16,6 +15,14 @@
 * Case-insensitive mode
 * Multi-line mode
 * Free-spacing mode
+* Capturing
+
+## Other work
+
+* DFA minimization
+* NFA with lazy DFA transformation
+* Recheck algorithm for finding ReDoS vulnerabilities
+* Much more documentation
 
 # Links
 

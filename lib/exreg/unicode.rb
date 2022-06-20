@@ -110,7 +110,20 @@ module Exreg
         when "block"
           block[value]
         when "general_category"
-          general_category[value]
+          case value
+          when "letter"
+            general_category["uppercase_letter"] +
+              general_category["lowercase_letter"] +
+              general_category["titlecase_letter"] +
+              general_category["modifier_letter"] +
+              general_category["other_letter"]
+          when "mark"
+            general_category["nonspacing_mark"] +
+              general_category["enclosing_mark"] +
+              general_category["spacing_mark"]
+          else
+            general_category[value]
+          end
         when "script_extension"
           script_extension[value]
         when "script"
