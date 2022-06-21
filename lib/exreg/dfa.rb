@@ -66,6 +66,20 @@ module Exreg
       end
     end
 
+    # This is a specialization of the range transition that will check for a
+    # match by using bitwise masking.
+    class MaskTransition
+      attr_reader :value
+
+      def initialize(value:)
+        @value = value
+      end
+
+      def deconstruct_keys(keys)
+        { value: value }
+      end
+    end
+
     # This represents a transition between two states in the DFA that accepts
     # any character within a range of values.
     class RangeTransition
@@ -189,8 +203,19 @@ module Exreg
         in Alphabet::Multiple[alphabets:]
           alphabets.each { |alphabet| connect(from, to, alphabet) }
         in Alphabet::None
+          # do nothing
         in Alphabet::Range[from: min, to: max]
-          from.connect(RangeTransition.new(from: min, to: max), to)
+          if ((min - 1) | min) == max
+            # This is a special case where we can check for a range of bytes by
+            # just masking the value against a bitmask. For example, if we have
+            # the minimum as 0b11110100 and the maximum as 0b11110111, then the
+            # predicate above passes and at runtime we can check if
+            # number & 0b11110100 == 0b11110100 (because the last 2 bits are
+            # included in the range).
+            from.connect(MaskTransition.new(value: min), to)
+          else
+            from.connect(RangeTransition.new(from: min, to: max), to)
+          end
         in Alphabet::Value[value:]
           from.connect(CharacterTransition.new(value: value), to)
         end
@@ -264,6 +289,8 @@ module Exreg
                 break to
               in DFA::CharacterTransition[value:]
                 break to if bytes[index] == value
+              in DFA::MaskTransition[value:]
+                break to if (bytes[index] & value) == value
               in DFA::RangeTransition[from: min, to: max]
                 break to if (min..max).cover?(bytes[index])
               end
