@@ -111,6 +111,7 @@ module Exreg
       public_send(predicate, /#{source}/.match?(string))
       public_send(predicate, pattern.nfa.match?(string))
       public_send(predicate, pattern.dfa.match?(string))
+      public_send(predicate, pattern.bytecode.match?(string))
       public_send(predicate, pattern.match?(string))
     end
   end

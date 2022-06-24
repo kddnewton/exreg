@@ -4,6 +4,7 @@ require "set"
 
 require_relative "exreg/alphabet"
 require_relative "exreg/ast"
+require_relative "exreg/bytecode"
 require_relative "exreg/dfa"
 require_relative "exreg/digraph"
 require_relative "exreg/flags"
@@ -37,6 +38,10 @@ module Exreg
 
     def dfa
       DFA.compile(nfa)
+    end
+
+    def bytecode
+      Bytecode.compile(dfa)
     end
 
     def match?(string)

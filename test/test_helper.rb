@@ -6,6 +6,7 @@ SimpleCov.start
 $:.unshift File.expand_path("../lib", __dir__)
 require "exreg"
 require "graphviz"
+require "pp"
 
 unless `which dot`.chomp.end_with?("dot")
   warn "YOU HAVE NOT INSTALLED GRAPHVIZ. We found no 'dot' in your path.\n" \
