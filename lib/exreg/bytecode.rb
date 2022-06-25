@@ -118,42 +118,34 @@ module Exreg
       end
 
       def label_for(state, index = :start)
-        :"state_#{state.label}_#{index}"
+        :"state_#{state}_#{index}"
       end
 
-      def compile(start_state)
-        visited = Set.new
-        queue = [start_state]
-
-        while (state = queue.shift)
-          next if visited.include?(state)
-
-          visited << state
+      def compile(automaton)
+        automaton.states.each do |state|
           label(label_for(state))
 
-          if state.final?
+          if automaton.final?(state)
             emit(Insn::Success.new)
             next
           else
             emit(Insn::FailLength.new)
           end
 
-          state.transitions.each_with_index do |(transition, next_state), index|
+          automaton.transitions[state].each_with_index do |(next_state, transition), index|
             label(label_for(state, index))
             next_label = label_for(next_state)
 
             case transition
-            in DFA::AnyTransition
+            in Automaton::AnyTransition
               emit(Insn::Jump.new(address: next_label))
-            in DFA::CharacterTransition[value:]
+            in Automaton::CharacterTransition[value:]
               emit(Insn::JumpByte.new(byte: value, address: next_label))
-            in DFA::MaskTransition[value:]
+            in Automaton::MaskTransition[value:]
               emit(Insn::JumpMask.new(mask: value, address: next_label))
-            in DFA::RangeTransition[from:, to:]
+            in Automaton::RangeTransition[from:, to:]
               emit(Insn::JumpRange.new(minimum: from, maximum: to, address: next_label))
             end
-
-            queue << next_state
           end
 
           emit(Insn::Failure.new)
@@ -235,7 +227,7 @@ module Exreg
     end
 
     def self.compile(dfa)
-      Machine.new(Compiler.new.compile(dfa.start_state))
+      Machine.new(Compiler.new.compile(dfa.automaton))
     end
   end
 end

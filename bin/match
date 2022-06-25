@@ -16,8 +16,8 @@ dfa = pattern.dfa
 
 puts source
 pp ast
-puts Exreg::DiGraph.call(nfa.start_state, "build/nfa.svg")
-puts Exreg::DiGraph.call(dfa.start_state, "build/dfa.svg")
+puts Exreg::DiGraph.call(nfa.automaton, "build/nfa.svg")
+puts Exreg::DiGraph.call(dfa.automaton, "build/dfa.svg")
 
 format = "%-10s %-10s %-10s %-10s"
 puts format % ["Input", "Native", "NFA", "DFA"]

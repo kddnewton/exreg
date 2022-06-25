@@ -4,6 +4,7 @@ require "set"
 
 require_relative "exreg/alphabet"
 require_relative "exreg/ast"
+require_relative "exreg/automaton"
 require_relative "exreg/bytecode"
 require_relative "exreg/dfa"
 require_relative "exreg/digraph"
