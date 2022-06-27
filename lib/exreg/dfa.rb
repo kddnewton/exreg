@@ -4,49 +4,6 @@ module Exreg
   # This module contains classes that make up the deterministic state machine
   # representation of the regular expression.
   module DFA
-    # This represents a state in the deterministic state machine. It contains a
-    # sublist of states from the non-deterministic state machine.
-    class State
-      attr_reader :states, :transitions
-
-      def initialize(label:, states:, transitions: {})
-        @label = label
-        @states = states
-        @transitions = transitions
-      end
-
-      def each_transition
-        return to_enum(__method__) unless block_given?
-
-        states.each do |state|
-          state.transitions.each do |transition, state|
-            yield transition, state
-          end
-        end
-      end
-
-      def eql?(other)
-        states == other.states
-      end
-
-      def final?
-        states.any?(&:final?)
-      end
-
-      def label
-        @label
-        # "{#{states.map(&:label).join(",")}}"
-      end
-
-      def hash
-        states.hash
-      end
-
-      def connect(transition, state)
-        @transitions[transition] = state
-      end
-    end
-
     # This class is responsible for compiling an NFA into a DFA. It does this
     # through a process called powerset construction or subset construction.
     #
@@ -60,10 +17,9 @@ module Exreg
     # the worst-case corresponding DFA could have as many as 2^n states. This
     # can be impractical for large NFAs.
     class Compiler
-      attr_reader :labels, :current
+      attr_reader :current
 
       def initialize(current)
-        @labels = (:"1"..).each
         @current = current
       end
 
@@ -71,11 +27,15 @@ module Exreg
         # This is a mapping from a set of states in the current automaton to the
         # name of the state in the new automaton.
         initial_state_set = current.epsilon_closure([current.initial_state])
-        state_sets = { initial_state_set => labels.next }
+        state_sets = { initial_state_set => :start }
 
         # This automaton is going to be used to hold all of the transitions and
         # states until we can do some final processing at the end.
-        automaton = Automaton.new(initial_state: state_sets[initial_state_set])
+        automaton =
+          Automaton.new(
+            states: %i[start],
+            initial_state: state_sets[initial_state_set]
+          )
 
         visited_state_sets = Set.new([initial_state_set])
         queue = [initial_state_set]
@@ -107,7 +67,7 @@ module Exreg
             # got a problem.
             raise if next_state_set.empty?
 
-            state_sets[next_state_set] ||= labels.next
+            state_sets[next_state_set] ||= automaton.state
             alphabet_states[next_state_set] =
               Alphabet.combine(alphabet_states[next_state_set], alphabet)
           end

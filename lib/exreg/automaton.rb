@@ -119,6 +119,10 @@ module Exreg
     # F ⊆ Q.
     attr_reader :accepting_states
 
+    # Enumerator[Symbol] - An enumerator that yields out labels for new states
+    # as necessary.
+    attr_reader :labels
+
     def initialize(
       states: [],
       transitions: Hash.new { |hash, key| hash[key] = [] },
@@ -129,11 +133,13 @@ module Exreg
       @transitions = transitions
       @initial_state = initial_state
       @accepting_states = accepting_states
+
+      # This enumerator is used to build out new states as they are necessary.
+      @labels = (:"1"..).each
     end
 
     # Connect two states in the automaton by a transition.
     def connect(start, finish, transition)
-      @states |= [start, finish]
       transitions[start].unshift([finish, transition])
     end
 
@@ -141,7 +147,6 @@ module Exreg
     # these transitions go onto the back of the list since our NFAs are eager by
     # default.
     def connect_epsilon(start, finish)
-      @states |= [start, finish]
       transitions[start] << [finish, EpsilonTransition.new]
     end
 
@@ -175,6 +180,13 @@ module Exreg
     # True if the given state is in the list of accepting states.
     def final?(state)
       accepting_states.include?(state)
+    end
+
+    # Create a new state and return its label.
+    def state
+      label = labels.next
+      states << label
+      label
     end
   end
 end

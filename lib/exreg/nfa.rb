@@ -8,10 +8,9 @@ module Exreg
     # Thompson's construction algorithm. For more information, see the paper:
     # https://dl.acm.org/doi/10.1145/363347.363387.
     class Compiler
-      attr_reader :labels, :encoder, :unicode, :automaton
+      attr_reader :encoder, :unicode, :automaton
 
       def initialize
-        @labels = (:"1"..).each
         @encoder = Encoding::UTF8.new(self)
         @unicode = Unicode::Cache.new
         @automaton =
@@ -28,7 +27,7 @@ module Exreg
         while ((node, start, finish) = queue.shift)
           case node
           in AST::Expression[items:]
-            inner = Array.new(items.length - 1) { labels.next }
+            inner = Array.new(items.length - 1) { automaton.state }
             states = [start, *inner, finish]
   
             items.each_with_index do |item, index|
@@ -147,7 +146,7 @@ module Exreg
             queue << [item, start, finish]
             automaton.connect_epsilon(finish, start)
           in AST::Quantified[item:, quantifier: AST::RangeQuantifier[minimum:, maximum: nil]]
-            inner = minimum == 0 ? [] : Array.new(minimum - 1) { labels.next }
+            inner = minimum == 0 ? [] : Array.new(minimum - 1) { automaton.state }
             states = [start, *inner, finish]
   
             minimum.times do |index|
@@ -156,7 +155,7 @@ module Exreg
   
             automaton.connect_epsilon(states[-1], states[-2])
           in AST::Quantified[item:, quantifier: AST::RangeQuantifier[minimum:, maximum:]]
-            inner = maximum == 0 ? [] : Array.new(maximum - 1) { labels.next }
+            inner = maximum == 0 ? [] : Array.new(maximum - 1) { automaton.state }
             states = [start, *inner, finish]
   
             maximum.times do |index|
@@ -179,7 +178,7 @@ module Exreg
       def connect(start, finish, min_bytes, max_bytes)
         states = [
           start,
-          *Array.new(min_bytes.length - 1) { labels.next },
+          *Array.new(min_bytes.length - 1) { automaton.state },
           finish
         ]
 
