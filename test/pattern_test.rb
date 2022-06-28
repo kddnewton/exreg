@@ -3,7 +3,7 @@
 require "test_helper"
 
 module Exreg
-  class DFATest < Minitest::Test
+  class PatternTest < Minitest::Test
     def test_alternation
       assert_matches("a|b", "xxx a xxx")
       assert_matches("a|b", "xxx b xxx")
