@@ -226,8 +226,8 @@ module Exreg
       end
     end
 
-    def self.compile(dfa)
-      Machine.new(Compiler.new.compile(dfa.automaton))
+    def self.compile(automaton)
+      Machine.new(Compiler.new.compile(automaton))
     end
   end
 end

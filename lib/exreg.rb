@@ -15,6 +15,9 @@ require_relative "exreg/unicode"
 
 require_relative "exreg/encoding/utf8"
 
+require_relative "exreg/strategy/backtracking"
+require_relative "exreg/strategy/deterministic"
+
 module Exreg
   # This is the main class that represents a regular expression. It effectively
   # mirrors Regexp from core Ruby.
@@ -24,7 +27,7 @@ module Exreg
     def initialize(source, flags = "")
       @source = source
       @flags = Flags[flags]
-      @machine = dfa
+      @machine = Strategy::Deterministic.new(dfa)
     end
 
     def ast

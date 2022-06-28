@@ -109,8 +109,8 @@ module Exreg
       PP.pp(pattern.ast, +"")
 
       public_send(predicate, /#{source}/.match?(string))
-      public_send(predicate, pattern.nfa.match?(string))
-      public_send(predicate, pattern.dfa.match?(string))
+      public_send(predicate, Strategy::Backtracking.new(pattern.nfa).match?(string))
+      public_send(predicate, Strategy::Deterministic.new(pattern.dfa).match?(string))
       public_send(predicate, pattern.bytecode.match?(string))
       public_send(predicate, pattern.match?(string))
     end
