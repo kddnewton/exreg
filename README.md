@@ -1,65 +1,69 @@
-# TODO
+# Exreg
 
-## Hard (impossible?) to implement in a DFA
+A regular expression engine built in Ruby.
 
-* Non-greedy repetition (`*?`, `+?`)
-* Subexpression calls
-* Assertions (lookahead/lookbehind)
+## Usage
 
-## Possible and should be implemented
+```ruby
+require "exreg"
 
-* Anchors
-* Character property inversion
-* Character set inversion
-* Character set composition
-* Case-insensitive mode
-* Multi-line mode
-* Free-spacing mode
-* Capturing
+pattern = Exreg::Pattern.new("abc")
+pattern.match?("xxx abc yyy zzz") # => true
+```
 
-## Other work
+### Basic functionality
 
-* DFA minimization
-* NFA with lazy DFA transformation
-* Recheck algorithm for finding ReDoS vulnerabilities
-* Much more documentation
+* `\` escape
+* `|` alternation
+* `(...)` grouping (not capturing yet)
+* `[...]` character class
 
-# Links
+### Character types
 
-## Implementations
+* `.` any character
+* `\w` word character (`Letter | Mark | Number | Connector_Punctuation`)
+* `\s` whitespace character (`[\x09-\x0D] | \x85 | Line_Separator | Paragraph_Separator | Space_Separator`)
+* `\d` decimal digit character (`Decimal_Number`)
+* `\h` hexadecimal digit character (`[0-9a-fA-f]`)
+* `\p{property-name}` matches unicode properties
 
-* [Irregexp](https://blog.chromium.org/2009/02/irregexp-google-chromes-new-regexp.html)
-* [.NET](https://docs.microsoft.com/en-us/dotnet/standard/base-types/details-of-regular-expression-behavior)
-* [one-more-re-nightmare](https://github.com/telekons/one-more-re-nightmare)
-* [Python](https://github.com/python/cpython/blob/main/Lib/re/__init__.py)
-* [RE2](https://github.com/google/re2)
-* [Recheck](https://makenowjust-labs.github.io/recheck/docs/internals/background/)
-* [Ruby](https://github.com/k-takata/Onigmo)
-* [Rust](https://github.com/rust-lang/regex) ([PR](https://github.com/rust-lang/regex/pull/164))
-* [TCL](https://github.com/garyhouston/hsrex)
-* V8
-  * [Tier up](https://v8.dev/blog/regexp-tier-up)
-  * [Deterministic](https://v8.dev/blog/non-backtracking-regexp)
+### Quantifiers
 
-## Various papers, blog posts, and articles
+* `?` 0 or 1 times
+* `*` 0 or more times
+* `+` 1 or more times
+* `{n,m}` at least n but no more than m times
+* `{n,}` at least n times
+* `{,n}` at least 0 but no more than n times (`{0,n}`)
+* `{n}` n times
 
-* [A Closer Look at TDFA](https://arxiv.org/abs/2206.01398)
-* [NFAs with Tagged Transitions, their Conversion to Deterministic Automata and Application to Regular Expressions (2000)](https://laurikari.net/ville/spire2000-tnfa.pdf)
-* [Static Detection of DoS Vulnerabilities in Programs that use Regular Expressions (2017)](https://arxiv.org/abs/1701.04045)
-* [On the Impact and Defeat of Regular Expression Denial of Service (2020)](https://vtechworks.lib.vt.edu/handle/10919/98593)
-* [Russ Cox series](https://swtch.com/~rsc/regexp/regexp1.html)
-* [A DFA for submatch extraction](https://nitely.github.io/assets/jan_2020_dfa_submatches_extraction.pdf)
-* [Compiling Nondeterministic Transducers to Deterministic Streaming Transducers](https://di.ku.dk/kmc/documents/ghrst2016-0-paper.pdf)
-* [Translating Regular Expression Matching into Transducers](https://ieeexplore.ieee.org/document/5715276)
-* [DFA minimization](https://en.wikipedia.org/wiki/DFA_minimization)
-* [NFA minimization](https://www.researchgate.net/publication/3045459_On_the_State_Minimization_of_Nondeterministic_Finite_Automata)
-* [Lazy DFAs](http://wwwmayr.informatik.tu-muenchen.de/lehre/2014WS/afs/2014-11-14.pdf)
-* [TruffleRuby regexp analyzer](https://github.com/Shopify/truffleruby-utils/tree/master/regexp-analyzer)
-* [Practical Experience with TRegex and Ruby](https://www.youtube.com/watch?v=0a73au-sbTM)
-* [Optimizing based on source encoding in graal](https://github.com/oracle/graal/pull/3806)
-* [Regular Expressions, Text Normalization, Edit Distance](https://web.stanford.edu/~jurafsky/slp3/2.pdf)
+### Character classes
 
-## Ruby
+* `x-y` range from x to y
 
-* [RubyConf 2013: Beneath The Surface: Harnessing The True Power of Regular Expressions in Ruby](https://www.youtube.com/watch?v=JfwS4ibJFDw)
-* [Exploring Ruby's Regular Expression Algorithm](https://patshaughnessy.net/2012/4/3/exploring-rubys-regular-expression-algorithm)
+### POSIX brackets
+
+* `[:alnum:]` (`Letter | Mark | Decimal_Number`)
+* `[:alpha:]` (`Letter | Mark`)
+* `[:ascii:]` (`[\x00-\x7F]`)
+* `[:blank:]` (`Space_Separator | \x09`)
+* `[:cntrl:]` (`Control | Format | Unassigned | Private_Use | Surrogate`)
+* `[:digit:]` (`Decimal_Number`)
+* `[:graph:]` (`[:^space:] && ^Control && ^Unassigned && ^Surrogate`)
+* `[:lower:]` (`Lowercase_Letter`)
+* `[:print:]` (`[:graph:] | Space_Separator`)
+* `[:punct:]` (`Connector_Punctuation | Dash_Punctuation | Close_Punctuation | Final_Punctuation | Initial_Punctuation | Other_Punctuation | Open_Punctuation | 0024 | 002B | 003C | 003D | 003E | 005E | 0060 | 007C | 007E`)
+* `[:space:]` (`Space_Separator | Line_Separator | Paragraph_Separator | 0009 | 000A | 000B | 000C | 000D | 0085`)
+* `[:upper:]` (`Uppercase_Letter`)
+* `[:xdigit:]` (`0030 - 0039 | 0041 - 0046 | 0061 - 0066`)
+* `[:word:]` (`Letter | Mark | Decimal_Number | Connector_Punctuation`)
+
+## Contributing
+
+Bug reports and pull requests are welcome on GitHub at https://github.com/kddnewton/exreg.
+
+To begin contributing, first clone the repository. Then you'll need to generate the unicode character sets for each of the properties we support by deriving them from the unicode source for your version of Ruby by running `bundle exec rake`. This will also run the tests.
+
+## License
+
+The gem is available as open source under the terms of the [MIT License](https://opensource.org/licenses/MIT).
