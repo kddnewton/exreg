@@ -13,35 +13,40 @@ module Exreg
 
       # Executes the machine against the given string.
       def match?(string)
-        current = automaton.initial_state
+        state = automaton.initial_state
 
         index = 0
         bytes = string.bytes
 
         loop do
-          return automaton.final?(current) if index == bytes.length
+          return automaton.final?(state) if index == bytes.length
 
-          selected =
-            automaton.transitions[current].detect do |(to, transition)|
-              case transition
-              in Automaton::AnyTransition
-                break to
-              in Automaton::CharacterTransition[value:]
-                break to if bytes[index] == value
-              in Automaton::MaskTransition[value:]
-                break to if (bytes[index] & value) == value
-              in Automaton::RangeTransition[from: min, to: max]
-                break to if (min..max).cover?(bytes[index])
-              end
-            end
+          next_state = step(state, bytes[index])
 
-          if !selected
-            return automaton.final?(current)
-          elsif automaton.final?(selected)
+          if !next_state
+            return automaton.final?(state)
+          elsif automaton.final?(next_state)
             return true
           else
-            current = selected
+            state = next_state
             index += 1
+          end
+        end
+      end
+
+      private
+
+      def step(state, byte)
+        automaton.transitions[state].detect do |(to, transition)|
+          case transition
+          in Automaton::AnyTransition
+            return to
+          in Automaton::CharacterTransition[value:]
+            return to if byte == value
+          in Automaton::MaskTransition[value:]
+            return to if (byte & value) == value
+          in Automaton::RangeTransition[from: min, to: max]
+            return to if (min..max).cover?(byte)
           end
         end
       end

@@ -17,6 +17,7 @@ require_relative "exreg/encoding/utf8"
 
 require_relative "exreg/strategy/backtracking"
 require_relative "exreg/strategy/deterministic"
+require_relative "exreg/strategy/lazy_deterministic"
 
 module Exreg
   # This is the main class that represents a regular expression. It effectively
