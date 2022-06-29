@@ -1,6 +1,10 @@
 # Exreg
 
-A regular expression engine built in Ruby.
+Exreg is a regular expression engine built in Ruby.
+
+The current regular expression engine in Ruby is [Onigmo](https://github.com/k-takata/Onigmo), a full-feature regular expression engine written in C. Its strategy for matching strings is to compile its regular expressions into a bytecode that models a non-deterministic state machine. For most cases this works well, but for some it can result in [catastrophic backtracking](https://www.regular-expressions.info/catastrophic.html).
+
+Backtracking is unavoidable when certain features are used in regular expressions (e.g., backreferences) because the power of the regular expression exceeds the power of a finite state automata. However, when those features are not used, other strategies for matching the input string can be employed. Namely, the state machine can be fully determinized at compile-time (ahead-of-time determinization) or lazily determinized at runtime (just-in-time determinization). Exreg provides the ability to take either of these approaches.
 
 ## Usage
 
