@@ -1,5 +1,8 @@
 # Exreg
 
+[![Build Status](https://github.com/kddnewton/exreg/workflows/Main/badge.svg)](https://github.com/kddnewton/exreg/actions)
+[![Gem Version](https://img.shields.io/gem/v/exreg.svg)](https://rubygems.org/gems/exreg)
+
 Exreg is a regular expression engine built in Ruby.
 
 The current regular expression engine in Ruby is [Onigmo](https://github.com/k-takata/Onigmo), a full-feature regular expression engine written in C. Its strategy for matching strings is to compile its regular expressions into a bytecode that models a non-deterministic state machine. For most cases this works well, but for some it can result in [catastrophic backtracking](https://www.regular-expressions.info/catastrophic.html).
