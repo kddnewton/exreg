@@ -132,7 +132,9 @@ module Exreg
             emit(Insn::FailLength.new)
           end
 
-          automaton.transitions[state].each_with_index do |(next_state, transition), index|
+          automaton.transitions[
+            state
+          ].each_with_index do |(next_state, transition), index|
             label(label_for(state, index))
             next_label = label_for(next_state)
 
@@ -144,7 +146,13 @@ module Exreg
             in Automaton::MaskTransition[value:]
               emit(Insn::JumpMask.new(mask: value, address: next_label))
             in Automaton::RangeTransition[from:, to:]
-              emit(Insn::JumpRange.new(minimum: from, maximum: to, address: next_label))
+              emit(
+                Insn::JumpRange.new(
+                  minimum: from,
+                  maximum: to,
+                  address: next_label
+                )
+              )
             end
           end
 
@@ -162,7 +170,11 @@ module Exreg
           in Insn::JumpMask[mask:, address:]
             Insn::JumpMask.new(mask: mask, address: labels[address])
           in Insn::JumpRange[minimum:, maximum:, address:]
-            Insn::JumpRange.new(minimum: minimum, maximum: maximum, address: labels[address])
+            Insn::JumpRange.new(
+              minimum: minimum,
+              maximum: maximum,
+              address: labels[address]
+            )
           end
         end
       end

@@ -46,10 +46,18 @@ module Exreg
       # harder because we need to mask a bunch of times to get the correct
       # groupings.
       def connect_range(start, finish, range)
-        connect_bytes1(start, finish, range) if ranges_overlap?(range, BYTES1_RANGE)
-        connect_bytes2(start, finish, range) if ranges_overlap?(range, BYTES2_RANGE)
-        connect_bytes3(start, finish, range) if ranges_overlap?(range, BYTES3_RANGE)
-        connect_bytes4(start, finish, range) if ranges_overlap?(range, BYTES4_RANGE)
+        if ranges_overlap?(range, BYTES1_RANGE)
+          connect_bytes1(start, finish, range)
+        end
+        if ranges_overlap?(range, BYTES2_RANGE)
+          connect_bytes2(start, finish, range)
+        end
+        if ranges_overlap?(range, BYTES3_RANGE)
+          connect_bytes3(start, finish, range)
+        end
+        if ranges_overlap?(range, BYTES4_RANGE)
+          connect_bytes4(start, finish, range)
+        end
       end
 
       # Connect an individual value between two states. This breaks it up into
@@ -57,10 +65,14 @@ module Exreg
       # an NFA it's okay for us to duplicate transitions here.
       def connect_value(start, finish, value)
         case value
-        when BYTES1_RANGE then connect_bytes1(start, finish, value..value)
-        when BYTES2_RANGE then connect_bytes2(start, finish, value..value)
-        when BYTES3_RANGE then connect_bytes3(start, finish, value..value)
-        when BYTES4_RANGE then connect_bytes4(start, finish, value..value)
+        when BYTES1_RANGE
+          connect_bytes1(start, finish, value..value)
+        when BYTES2_RANGE
+          connect_bytes2(start, finish, value..value)
+        when BYTES3_RANGE
+          connect_bytes3(start, finish, value..value)
+        when BYTES4_RANGE
+          connect_bytes4(start, finish, value..value)
         end
       end
 
@@ -130,15 +142,17 @@ module Exreg
 
         byte1_step = 1 << 6
 
-        BYTES2_RANGE.begin.step(BYTES2_RANGE.end, byte1_step) do |step_min|
-          step_max = step_min + byte1_step - 1
+        BYTES2_RANGE
+          .begin
+          .step(BYTES2_RANGE.end, byte1_step) do |step_min|
+            step_max = step_min + byte1_step - 1
 
-          if ranges_overlap?(range, step_min..step_max)
-            min_bytes = encode_bytes2([step_min, range.begin].max)
-            max_bytes = encode_bytes2([step_max, range.end].min)
-            compiler.connect(start, finish, min_bytes, max_bytes)
+            if ranges_overlap?(range, step_min..step_max)
+              min_bytes = encode_bytes2([step_min, range.begin].max)
+              max_bytes = encode_bytes2([step_max, range.end].min)
+              compiler.connect(start, finish, min_bytes, max_bytes)
+            end
           end
-        end
       end
 
       # Connect the states for values that fall within the range that would be
@@ -156,28 +170,33 @@ module Exreg
         byte1_step = 1 << 12
         byte2_step = 1 << 6
 
-        BYTES3_RANGE.begin.step(BYTES3_RANGE.end, byte1_step) do |parent_step_min|
-          parent_step_max = parent_step_min + byte1_step - 1
+        BYTES3_RANGE
+          .begin
+          .step(BYTES3_RANGE.end, byte1_step) do |parent_step_min|
+            parent_step_max = parent_step_min + byte1_step - 1
 
-          if range_encapsulates?(range, parent_step_min..parent_step_max)
-            # If we can shortcut because the range entirely encapsulates this
-            # slice of the second byte, then we do that here.
-            min_bytes = encode_bytes3(parent_step_min)
-            max_bytes = encode_bytes3(parent_step_max)
-            compiler.connect(start, finish, min_bytes, max_bytes)
-          elsif ranges_overlap?(range, parent_step_min..parent_step_max)
-            # Otherwise, we need to further slice down into the third byte.
-            parent_step_min.step(parent_step_max, byte2_step) do |child_step_min|
-              child_step_max = child_step_min + byte2_step - 1
+            if range_encapsulates?(range, parent_step_min..parent_step_max)
+              # If we can shortcut because the range entirely encapsulates this
+              # slice of the second byte, then we do that here.
+              min_bytes = encode_bytes3(parent_step_min)
+              max_bytes = encode_bytes3(parent_step_max)
+              compiler.connect(start, finish, min_bytes, max_bytes)
+            elsif ranges_overlap?(range, parent_step_min..parent_step_max)
+              # Otherwise, we need to further slice down into the third byte.
+              parent_step_min.step(
+                parent_step_max,
+                byte2_step
+              ) do |child_step_min|
+                child_step_max = child_step_min + byte2_step - 1
 
-              if ranges_overlap?(range, child_step_min..child_step_max)
-                min_bytes = encode_bytes3([child_step_min, range.begin].max)
-                max_bytes = encode_bytes3([child_step_max, range.end].min)
-                compiler.connect(start, finish, min_bytes, max_bytes)
+                if ranges_overlap?(range, child_step_min..child_step_max)
+                  min_bytes = encode_bytes3([child_step_min, range.begin].max)
+                  max_bytes = encode_bytes3([child_step_max, range.end].min)
+                  compiler.connect(start, finish, min_bytes, max_bytes)
+                end
               end
             end
           end
-        end
       end
 
       # Connect the states for values that fall within the range that would be
@@ -196,41 +215,56 @@ module Exreg
         byte2_step = 1 << 12
         byte3_step = 1 << 6
 
-        BYTES4_RANGE.begin.step(BYTES4_RANGE.end, byte1_step) do |grand_parent_step_min|
-          grand_parent_step_max = grand_parent_step_min + byte1_step - 1
+        BYTES4_RANGE
+          .begin
+          .step(BYTES4_RANGE.end, byte1_step) do |grand_parent_step_min|
+            grand_parent_step_max = grand_parent_step_min + byte1_step - 1
 
-          if range_encapsulates?(range, grand_parent_step_min..grand_parent_step_max)
-            # If we can shortcut because the range entirely encapsulates this
-            # slice of the second byte, then we do that here.
-            min_bytes = encode_bytes4(grand_parent_step_min)
-            max_bytes = encode_bytes4(grand_parent_step_max)
-            compiler.connect(start, finish, min_bytes, max_bytes)
-          elsif ranges_overlap?(range, grand_parent_step_min..grand_parent_step_max)
-            # Otherwise, we need to further slice down into the third byte.
-            grand_parent_step_min.step(grand_parent_step_max, byte2_step) do |parent_step_min|
-              parent_step_max = parent_step_min + byte2_step - 1
+            if range_encapsulates?(
+                 range,
+                 grand_parent_step_min..grand_parent_step_max
+               )
+              # If we can shortcut because the range entirely encapsulates this
+              # slice of the second byte, then we do that here.
+              min_bytes = encode_bytes4(grand_parent_step_min)
+              max_bytes = encode_bytes4(grand_parent_step_max)
+              compiler.connect(start, finish, min_bytes, max_bytes)
+            elsif ranges_overlap?(
+                  range,
+                  grand_parent_step_min..grand_parent_step_max
+                )
+              # Otherwise, we need to further slice down into the third byte.
+              grand_parent_step_min.step(
+                grand_parent_step_max,
+                byte2_step
+              ) do |parent_step_min|
+                parent_step_max = parent_step_min + byte2_step - 1
 
-              if range_encapsulates?(range, parent_step_min..parent_step_max)
-                # If we can shortcut because the range entirely encapsulates
-                # this slice of the third byte, then we do that here.
-                min_bytes = encode_bytes4(parent_step_min)
-                max_bytes = encode_bytes4(parent_step_max)
-                compiler.connect(start, finish, min_bytes, max_bytes)
-              elsif ranges_overlap?(range, parent_step_min..parent_step_max)
-                # Otherwise, we need to further slice down into the fourth byte.
-                parent_step_min.step(parent_step_max, byte3_step) do |child_step_min|
-                  child_step_max = child_step_min + byte3_step - 1
+                if range_encapsulates?(range, parent_step_min..parent_step_max)
+                  # If we can shortcut because the range entirely encapsulates
+                  # this slice of the third byte, then we do that here.
+                  min_bytes = encode_bytes4(parent_step_min)
+                  max_bytes = encode_bytes4(parent_step_max)
+                  compiler.connect(start, finish, min_bytes, max_bytes)
+                elsif ranges_overlap?(range, parent_step_min..parent_step_max)
+                  # Otherwise, we need to further slice down into the fourth byte.
+                  parent_step_min.step(
+                    parent_step_max,
+                    byte3_step
+                  ) do |child_step_min|
+                    child_step_max = child_step_min + byte3_step - 1
 
-                  if ranges_overlap?(range, child_step_min..child_step_max)
-                    min_bytes = encode_bytes4([child_step_min, range.begin].max)
-                    max_bytes = encode_bytes4([child_step_max, range.end].min)
-                    compiler.connect(start, finish, min_bytes, max_bytes)
+                    if ranges_overlap?(range, child_step_min..child_step_max)
+                      min_bytes =
+                        encode_bytes4([child_step_min, range.begin].max)
+                      max_bytes = encode_bytes4([child_step_max, range.end].min)
+                      compiler.connect(start, finish, min_bytes, max_bytes)
+                    end
                   end
                 end
               end
             end
           end
-        end
       end
     end
   end

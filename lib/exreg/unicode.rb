@@ -46,13 +46,15 @@ module Exreg
         value = (entries || read)[key]
         return nil unless value
 
-        value.split(",").map do |entry|
-          if entry =~ /\A(\d+)\.\.(\d+)\z/
-            Range.new(min: $1.to_i, max: $2.to_i)
-          else
-            Value.new(value: entry.to_i)
+        value
+          .split(",")
+          .map do |entry|
+            if entry =~ /\A(\d+)\.\.(\d+)\z/
+              Range.new(min: $1.to_i, max: $2.to_i)
+            else
+              Value.new(value: entry.to_i)
+            end
           end
-        end
       end
 
       private
@@ -60,7 +62,10 @@ module Exreg
       # Read through the file and cache each of the entries.
       def read
         @entries = {}
-        File.foreach(File.join(CACHE_DIRECTORY, filename), chomp: true) do |line|
+        File.foreach(
+          File.join(CACHE_DIRECTORY, filename),
+          chomp: true
+        ) do |line|
           _, name, items = *line.match(/\A(.+?)\s+(.+)\z/)
           @entries[name.downcase] = items
         end
@@ -73,8 +78,14 @@ module Exreg
     # previously calculated within the \p{} syntax. We use this cache to quickly
     # efficiently craft transitions between states using properties.
     class Cache
-      attr_reader :age, :block, :core_property, :general_category,
-                  :miscellaneous, :property, :script, :script_extension
+      attr_reader :age,
+                  :block,
+                  :core_property,
+                  :general_category,
+                  :miscellaneous,
+                  :property,
+                  :script,
+                  :script_extension
 
       def initialize
         @age = LazyProperty.new("age.txt")
@@ -141,7 +152,9 @@ module Exreg
     end
 
     def self.generate
-      URI.open("https://www.unicode.org/Public/#{version}/ucd/UCD.zip") do |file|
+      URI.open(
+        "https://www.unicode.org/Public/#{version}/ucd/UCD.zip"
+      ) do |file|
         Zip::File.open_buffer(file) do |zipfile|
           Generate.new(zipfile, CACHE_DIRECTORY).generate
         end

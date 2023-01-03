@@ -28,7 +28,8 @@ module Exreg
             in Automaton::EpsilonTransition
               match_at?(to, bytes, index)
             in Automaton::RangeTransition[from: range_from, to: range_to]
-              if index < bytes.length && (range_from..range_to).cover?(bytes[index])
+              if index < bytes.length &&
+                   (range_from..range_to).cover?(bytes[index])
                 match_at?(to, bytes, index + 1)
               end
             end

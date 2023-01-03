@@ -2,16 +2,18 @@
 
 require "bundler/gem_tasks"
 require "rake/testtask"
+require "syntax_tree/rake_tasks"
 
-UNICODE_CACHES = %w[
-  age
-  core_property
-  general_category
-  miscellaneous
-  property
-  script
-  script_extension
-].map { "lib/exreg/unicode/#{_1}.txt" }
+UNICODE_CACHES =
+  %w[
+    age
+    core_property
+    general_category
+    miscellaneous
+    property
+    script
+    script_extension
+  ].map { "lib/exreg/unicode/#{_1}.txt" }
 
 UNICODE_CACHES.each do |filepath|
   file filepath do
@@ -32,3 +34,13 @@ Rake::TestTask.new(test: UNICODE_CACHES) do |t|
 end
 
 task default: :test
+
+configure = ->(task) do
+  task.source_files =
+    FileList[%w[Gemfile Rakefile *.gemspec lib/**/*.rb test/**/*.rb]]
+
+  task.source_files -= FileList[%w[lib/exreg/alphabet.rb lib/exreg/parser.rb]]
+end
+
+SyntaxTree::Rake::CheckTask.new(&configure)
+SyntaxTree::Rake::WriteTask.new(&configure)

@@ -68,15 +68,22 @@ module Exreg
             raise if next_state_set.empty?
 
             state_sets[next_state_set] ||= automaton.state
-            alphabet_states[next_state_set] =
-              Alphabet.combine(alphabet_states[next_state_set], alphabet)
+            alphabet_states[next_state_set] = Alphabet.combine(
+              alphabet_states[next_state_set],
+              alphabet
+            )
           end
 
           # Next, we're going to add the new states and all of the associated
           # transitions.
           alphabet_states.each do |next_state_set, next_alphabet|
             next_alphabet.to_a.each do |alphabet|
-              connect(automaton, state_sets[state_set], state_sets[next_state_set], alphabet)
+              connect(
+                automaton,
+                state_sets[state_set],
+                state_sets[next_state_set],
+                alphabet
+              )
             end
 
             unless visited_state_sets.include?(next_state_set)
@@ -143,12 +150,24 @@ module Exreg
             # predicate above passes and at runtime we can check if
             # number & 0b11110100 == 0b11110100 (because the last 2 bits are
             # included in the range).
-            automaton.connect(from, to, Automaton::MaskTransition.new(value: min))
+            automaton.connect(
+              from,
+              to,
+              Automaton::MaskTransition.new(value: min)
+            )
           else
-            automaton.connect(from, to, Automaton::RangeTransition.new(from: min, to: max))
+            automaton.connect(
+              from,
+              to,
+              Automaton::RangeTransition.new(from: min, to: max)
+            )
           end
         in Alphabet::Value[value:]
-          automaton.connect(from, to, Automaton::CharacterTransition.new(value: value))
+          automaton.connect(
+            from,
+            to,
+            Automaton::CharacterTransition.new(value: value)
+          )
         end
       end
 
@@ -159,7 +178,10 @@ module Exreg
           true
         in [Alphabet::Range[from:, to:], Automaton::CharacterTransition[value:]]
           (from..to).cover?(value)
-        in [Alphabet::Range[from: alpha_from, to: alpha_to], Automaton::RangeTransition[from:, to:]]
+        in [
+             Alphabet::Range[from: alpha_from, to: alpha_to],
+             Automaton::RangeTransition[from:, to:]
+           ]
           from <= alpha_from && to >= alpha_to
         in [Alphabet::Value[value: ord], Automaton::CharacterTransition[value:]]
           value == ord

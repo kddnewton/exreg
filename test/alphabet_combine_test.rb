@@ -13,11 +13,12 @@ module Exreg
 
     def test_any_x_multiple
       left = Alphabet::Any.new
-      right = Alphabet::Multiple[
-        Alphabet::Range[Alphabet::MINIMUM, 5],
-        Alphabet::Value[7],
-        Alphabet::Value[8]
-      ]
+      right =
+        Alphabet::Multiple[
+          Alphabet::Range[Alphabet::MINIMUM, 5],
+          Alphabet::Value[7],
+          Alphabet::Value[8]
+        ]
 
       assert_equal(Alphabet::Any.new, Alphabet.combine(left, right))
     end
@@ -48,11 +49,12 @@ module Exreg
     end
 
     def test_multiple_x_none
-      left = Alphabet::Multiple[
-        Alphabet::Range[Alphabet::MINIMUM, 5],
-        Alphabet::Value[7],
-        Alphabet::Value[8]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Range[Alphabet::MINIMUM, 5],
+          Alphabet::Value[7],
+          Alphabet::Value[8]
+        ]
 
       right = Alphabet::None.new
 
@@ -60,127 +62,133 @@ module Exreg
     end
 
     def test_multiple_x_range_before
-      left = Alphabet::Multiple[
-        Alphabet::Range[7, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Range[7, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       right = Alphabet::Range[3, 6]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Range[3, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      expected =
+        Alphabet::Multiple[
+          Alphabet::Range[3, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
 
     def test_multiple_x_range_after
-      left = Alphabet::Multiple[
-        Alphabet::Range[7, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Range[7, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       right = Alphabet::Range[21, 30]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Range[7, 10],
-        Alphabet::Value[15],
-        Alphabet::Range[20, 30]
-      ]
+      expected =
+        Alphabet::Multiple[
+          Alphabet::Range[7, 10],
+          Alphabet::Value[15],
+          Alphabet::Range[20, 30]
+        ]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
 
     def test_multiple_x_range_overlap
-      left = Alphabet::Multiple[
-        Alphabet::Range[7, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Range[7, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       right = Alphabet::Range[8, 18]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Range[7, 18],
-        Alphabet::Value[20]
-      ]
+      expected = Alphabet::Multiple[Alphabet::Range[7, 18], Alphabet::Value[20]]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
 
     def test_multiple_x_value_before
-      left = Alphabet::Multiple[
-        Alphabet::Range[5, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Range[5, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       right = Alphabet::Value[3]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Range[5, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      expected =
+        Alphabet::Multiple[
+          Alphabet::Value[3],
+          Alphabet::Range[5, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
 
     def test_multiple_x_value_after
-      left = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Range[5, 10],
-        Alphabet::Value[15]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Value[3],
+          Alphabet::Range[5, 10],
+          Alphabet::Value[15]
+        ]
 
       right = Alphabet::Value[20]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Range[5, 10],
-        Alphabet::Value[15],
-        Alphabet::Value[20]
-      ]
+      expected =
+        Alphabet::Multiple[
+          Alphabet::Value[3],
+          Alphabet::Range[5, 10],
+          Alphabet::Value[15],
+          Alphabet::Value[20]
+        ]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
 
     def test_multiple_x_value_middle_no_overlap
-      left = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Value[15]
-      ]
+      left = Alphabet::Multiple[Alphabet::Value[3], Alphabet::Value[15]]
 
       right = Alphabet::Value[10]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Value[10],
-        Alphabet::Value[15]
-      ]
+      expected =
+        Alphabet::Multiple[
+          Alphabet::Value[3],
+          Alphabet::Value[10],
+          Alphabet::Value[15]
+        ]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
 
     def test_multiple_x_value_middle_overlap
-      left = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Range[8, 12],
-        Alphabet::Value[15]
-      ]
+      left =
+        Alphabet::Multiple[
+          Alphabet::Value[3],
+          Alphabet::Range[8, 12],
+          Alphabet::Value[15]
+        ]
 
       right = Alphabet::Value[11]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Range[8, 12],
-        Alphabet::Value[15]
-      ]
+      expected =
+        Alphabet::Multiple[
+          Alphabet::Value[3],
+          Alphabet::Range[8, 12],
+          Alphabet::Value[15]
+        ]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
@@ -267,10 +275,7 @@ module Exreg
       left = Alphabet::Range[5, 10]
       right = Alphabet::Value[3]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Value[3],
-        Alphabet::Range[5, 10]
-      ]
+      expected = Alphabet::Multiple[Alphabet::Value[3], Alphabet::Range[5, 10]]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end
@@ -279,10 +284,7 @@ module Exreg
       left = Alphabet::Range[5, 10]
       right = Alphabet::Value[13]
 
-      expected = Alphabet::Multiple[
-        Alphabet::Range[5, 10],
-        Alphabet::Value[13]
-      ]
+      expected = Alphabet::Multiple[Alphabet::Range[5, 10], Alphabet::Value[13]]
 
       assert_equal(expected, Alphabet.combine(left, right))
     end

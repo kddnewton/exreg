@@ -1,0 +1,23 @@
+name: Main
+
+on:
+- push
+- pull_request
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+    steps:
+    - run: sudo apt-get install libsqlite3-dev
+    - uses: actions/checkout@master
+    - uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+        bundler-cache: true
+    - name: Lint and test
+      run: |
+        bundle exec rake stree:check
+        bundle exec rake test

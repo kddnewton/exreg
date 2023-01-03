@@ -14,8 +14,11 @@ module Exreg
       nodes = {}
 
       automaton.states.each do |state|
-        nodes[state] =
-          graph.add_node(state.object_id, label: state.to_s, shape: automaton.final?(state) ? "box" : "oval")
+        nodes[state] = graph.add_node(
+          state.object_id,
+          label: state.to_s,
+          shape: automaton.final?(state) ? "box" : "oval"
+        )
       end
 
       # Next, write out all of the transitions.
