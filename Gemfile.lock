@@ -6,7 +6,7 @@ GEM
     graphviz (1.2.1)
       process-pipeline
     minitest (5.18.0)
-    prettier_print (1.2.0)
+    prettier_print (1.2.1)
     process-group (1.2.4)
       process-terminal (~> 0.2.0)
     process-pipeline (1.0.2)
@@ -21,7 +21,7 @@ GEM
       simplecov_json_formatter (~> 0.1)
     simplecov-html (0.12.3)
     simplecov_json_formatter (0.1.4)
-    syntax_tree (6.0.2)
+    syntax_tree (6.1.0)
       prettier_print (>= 1.2.0)
 
 PLATFORMS
