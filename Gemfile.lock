@@ -5,7 +5,7 @@ GEM
     ffi (1.15.5)
     graphviz (1.2.1)
       process-pipeline
-    minitest (5.22.0)
+    minitest (5.22.1)
     prettier_print (1.2.1)
     process-group (1.2.4)
       process-terminal (~> 0.2.0)
