@@ -13,7 +13,7 @@ GEM
       process-group
     process-terminal (0.2.0)
       ffi
-    rake (13.1.0)
+    rake (13.2.0)
     rubyzip (2.3.2)
     simplecov (0.22.0)
       docile (~> 1.1)
