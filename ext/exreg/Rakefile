@@ -1,0 +1,199 @@
+# frozen_string_literal: true
+
+require "open-uri"
+require "zip"
+
+class UNames
+  def initialize
+    @names = {}
+  end
+
+  def fetch(name)
+    @names.fetch(normal(name))
+  end
+
+  def size
+    @names.size
+  end
+
+  def key?(name)
+    @names.key?(normal(name))
+  end
+
+  def each_key(&block)
+    @names.each_key(&block)
+  end
+
+  def [](name)
+    @names[normal(name)]
+  end
+
+  def []=(name, value)
+    norm = normal(name)
+    raise name if @names.key?(norm)
+    @names[norm] = value
+  end
+
+  private
+
+  def normal(name)
+    name.downcase.delete(" _-")
+  end
+end
+
+class USet
+  attr_reader :ranges
+
+  def initialize(ranges = [])
+    @ranges = ranges
+  end
+
+  def <<(member)
+    case member
+    when %r{\A(\h+)\z}
+      codepoint = Integer($1, 16)
+      @ranges << (codepoint...(codepoint + 1))
+    when %r{\A(\h+)\.\.(\h+)\z}
+      @ranges << (Integer($1, 16)...(Integer($2, 16) + 1))
+    else
+      raise member
+    end
+  end
+end
+
+class CaseFold
+  attr_reader :segments
+
+  def initialize
+    @segments = []
+  end
+
+  def add(lower, upper)
+    if @segments.any? && @segments[-1][2] == upper - lower && @segments[-1][1] + 1 == lower
+      @segments[-1][1] = lower
+    else
+      @segments << [lower, lower, upper - lower]
+    end
+  end
+
+  def mirror!
+    @segments
+      .concat(@segments.map { |lower, upper, delta| [lower + delta, upper + delta, -delta] })
+      .sort_by!(&:first)
+  end
+end
+
+file "lib/exreg/unicode.data" do |task|
+  names = UNames.new
+  casef = CaseFold.new
+  usets = []
+  metas = {}
+
+  URI.open("https://www.unicode.org/Public/#{RbConfig::CONFIG["UNICODE_VERSION"]}/ucd/UCD.zip") do |remote|
+    Zip::File.open_buffer(remote) do |zipfile|
+      zipfile.get_input_stream("PropertyValueAliases.txt").each_line do |line|
+        case line
+        when /\Aage; (.+?)\s*;\s*.+\Z/
+          usets << (names["age=#{$1}"] = USet.new) if $1 != "NA"
+        when /\Ablk; (.+)\Z/
+          _, original, = $1.split(/\s*;\s*/)
+          usets << (names["in#{original}"] = USet.new)
+        when /\Agc ; (.+?)\s*(?:# (.+))?\Z/
+          meta = $2
+          main_alias, original, *other_aliases = $1.split(/\s*;\s*/)
+
+          if meta
+            metas[original] = [main_alias] + meta.split(/\s*\|\s*/)
+          else
+            usets << (set = names[original] = names[main_alias] = USet.new)
+            other_aliases.each { |alias_name| names[alias_name] = set }
+          end
+        when /\Asc ; (.+)\Z/
+          main_alias, original, *other_aliases = $1.split(/\s*;\s*/)
+          usets << (set = names[original] = USet.new)
+          names[main_alias] = set if main_alias != original
+          other_aliases.each { |alias_name| names[alias_name] = set }
+        end
+      end
+
+      zipfile.get_input_stream("DerivedAge.txt").each_line do |line|
+        names.fetch("age=#{$2}") << $1 if %r{\A([^#].+?)\s*; (.+) #.+\Z} =~ line
+      end
+
+      zipfile.get_input_stream("DerivedCoreProperties.txt").each_line do |line|
+        if %r{\A([^#].+?)\s*; (.+) #.+\Z} =~ line
+          usets << (names[$2] = USet.new) if !names.key?($2)
+          names[$2] << $1
+        end
+      end
+
+      zipfile.get_input_stream("Blocks.txt").each_line do |line|
+        names.fetch("in#{$2}") << $1 if %r{\A([^#].+?)\s*; (.+) #.+\Z} =~ line
+      end
+
+      zipfile.get_input_stream("PropList.txt").each_line do |line|
+        if %r{\A([^#].+?)\s*; (.+) #.+\Z} =~ line
+          usets << (names[$2] = USet.new) if !names.key?($2)
+          names[$2] << $1
+        end
+      end
+
+      zipfile.get_input_stream("Scripts.txt").each_line do |line|
+        names.fetch($2) << $1 if %r{\A([^#].+?)\s*; (.+?) #.+\Z} =~ line
+      end
+
+      zipfile.get_input_stream("emoji/emoji-data.txt").each_line do |line|
+        if %r{\A([^#].+?)\s*; (.+)\s+#.+\Z} =~ line
+          usets << (names[$2] = USet.new) if !names.key?($2)
+          names[$2] << $1
+        end
+      end
+
+      zipfile.get_input_stream("extracted/DerivedGeneralCategory.txt").each_line do |line|
+        names.fetch($2) << $1 if %r{\A([^#].+?)\s*; (.+?) #.+\Z} =~ line
+      end
+
+      zipfile.get_input_stream("PropertyAliases.txt").each_line do |line|
+        if %r{\A([^#].+)\Z} =~ line
+          main_alias, original, *other_aliases = $1.split(/\s*;\s*/)
+          names[main_alias] = names[original] if names.key?(original) && !names.key?(main_alias)
+        end
+      end
+
+      zipfile.get_input_stream("CaseFolding.txt").each_line do |line|
+        casef.add(Integer($1, 16), Integer($2, 16)) if line =~ /\A(\h+); C; (\h+); #.+\Z/
+      end
+      casef.mirror!
+    end
+  end
+
+  metas.each do |name, (main_alias, *parts)|
+    usets << (names[main_alias] = names[name] = USet.new(parts.flat_map { |part| names.fetch(part).ranges }.sort_by(&:begin)))
+  end
+
+  offsets = {}
+  buffer = (+"").b
+  ["EXREG", names.size, 0, 0, 0].pack("A5SLLL", buffer: buffer)
+
+  usets.each do |uset|
+    offsets[uset] = buffer.bytesize
+    [uset.ranges.size].pack("S", buffer: buffer)
+    uset.ranges.each { |range| [range.begin, range.end].pack("LL", buffer: buffer) }
+  end
+
+  buffer[7, 4] = [buffer.bytesize].pack("L")
+  names.each_key do |name|
+    [name, offsets[names.fetch(name)]].pack("Z*L", buffer: buffer)
+  end
+
+  buffer[11, 4] = [buffer.bytesize].pack("L")
+  [casef.segments.size].pack("S", buffer: buffer)
+  casef.segments.each { |lower, upper, delta| [lower, upper + 1].pack("LL", buffer: buffer) }
+
+  buffer[15, 4] = [buffer.bytesize].pack("L")
+  casef.segments.each { |_, _, delta| [delta].pack("l", buffer: buffer) }
+
+  File.write(task.name, buffer)
+end
+
+task default: "lib/exreg/unicode.data"

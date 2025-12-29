@@ -1,0 +1,23 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    minitest (6.0.0)
+      prism (~> 1.5)
+    prism (1.7.0)
+    rake (13.3.1)
+    rubyzip (3.2.2)
+    strscan (3.1.6)
+
+PLATFORMS
+  arm64-darwin-23
+  ruby
+
+DEPENDENCIES
+  bundler
+  minitest
+  rake
+  rubyzip
+  strscan
+
+BUNDLED WITH
+   2.5.16
