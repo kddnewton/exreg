@@ -327,7 +327,6 @@ module Exreg
     end
 
     def test_nested_quantifiers
-      skip "failing"
       # Test quantifiers with grouped patterns
       pattern = Pattern.new("(?:[a-z]{2})+")
       match = pattern.match("  aabbccdd  ")

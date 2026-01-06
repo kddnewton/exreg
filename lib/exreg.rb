@@ -1467,12 +1467,15 @@ module Exreg
     private
 
     def match_at(string, start_idx, string_len)
+      last_match = nil
       state, match_data = closure([[@start_pc, [start_idx, *Array.new(@ncaptures * 2 - 1)]]], start_idx, string_len, string)
-      return match_data if match_data
+
+      if match_data
+        last_match = match_data
+        return match_data if state.empty?
+      end
 
       string_idx = start_idx
-      last_match = nil
-
       while string_idx < string_len
         byte = string.getbyte(string_idx)
         next_entries = []
