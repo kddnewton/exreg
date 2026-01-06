@@ -1,6 +1,6 @@
 # Exreg
 
-A Unicode regular expression library written in Ruby.
+A non-backtracking Unicode regular expression library written in Ruby.
 
 ## Usage
 
@@ -20,7 +20,7 @@ pattern.match?("xxx abc yyy zzz") # => true
 * Look-ahead and look-behind assertions (`(?=subexp)`, `(?!subexp)`, `(?<=subexp)`, `(?<!subexp)`)
 * Backreferences (`\n`, `\k<n>`, etc.)
 
-It also includes these less-commonly used features:
+It also does not implement these less-commonly used features:
 
 * Extended form (`x` option)
 * Extended grapheme cluster (`\X`)
