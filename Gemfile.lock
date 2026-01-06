@@ -6,7 +6,7 @@ GEM
     prism (1.7.0)
     rake (13.3.1)
     rubyzip (3.2.2)
-    strscan (3.1.6)
+    strscan (3.1.7)
 
 PLATFORMS
   arm64-darwin-23
