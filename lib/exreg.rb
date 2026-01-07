@@ -389,6 +389,8 @@ module Exreg
       when skip("\\A") then [:bos]
       when skip("\\Z") then [:eosnl]
       when skip("\\z") then [:eos]
+      when skip("\\B") then [:nwb]
+      when skip("\\b") then [:wb]
       when skip("\\D") then [:ndig]
       when skip("\\d") then [:dig]
       when skip("\\H") then [:nhex]
@@ -526,6 +528,137 @@ module Exreg
     end
   end
 
+  # A byte order handler for little-endian encoding.
+  class ByteOrderLE
+    def order(bytes)
+      bytes
+    end
+  end
+
+  # A byte order handler for big-endian encoding.
+  class ByteOrderBE
+    def order(bytes)
+      bytes.reverse
+    end
+  end
+
+  # A word boundary checker for each supported encoding. Necessary for
+  # implementing the \b and \B assertions.
+  module WordBoundary
+    class UTF_8
+      def initialize(word_set)
+        @word_set = word_set
+      end
+
+      def boundary?(string, byte_idx)
+        prevc = previous_codepoint(string, byte_idx)
+        nextc = next_codepoint(string, byte_idx)
+        (prevc && @word_set.has?(prevc)) ^ (nextc && @word_set.has?(nextc))
+      end
+
+      private
+
+      def previous_codepoint(string, byte_idx)
+        if byte_idx > 0
+          idx = byte_idx - 1
+          byte = string.getbyte(idx)
+          return byte if byte < 0x80
+
+          idx -= 1 while idx > 0 && idx > byte_idx - 4 && (string.getbyte(idx) & 0xC0) == 0x80
+          next_codepoint(string, idx) if idx >= 0
+        end
+      end
+
+      def next_codepoint(string, byte_idx)
+        if byte_idx < string.bytesize
+          byte = string.getbyte(byte_idx)
+
+          if (byte & 0x80) == 0x00  # 1-byte (0xxxxxxx)
+            byte
+          elsif (byte & 0xE0) == 0xC0  # 2-byte (110xxxxx)
+            ((byte & 0x1F) << 6) | (string.getbyte(byte_idx + 1) & 0x3F) if byte_idx + 1 < string.bytesize
+          elsif (byte & 0xF0) == 0xE0  # 3-byte (1110xxxx)
+            ((byte & 0x0F) << 12) | ((string.getbyte(byte_idx + 1) & 0x3F) << 6) | (string.getbyte(byte_idx + 2) & 0x3F) if byte_idx + 2 < string.bytesize
+          elsif (byte & 0xF8) == 0xF0  # 4-byte (11110xxx)
+            ((byte & 0x07) << 18) | ((string.getbyte(byte_idx + 1) & 0x3F) << 12) | ((string.getbyte(byte_idx + 2) & 0x3F) << 6) | (string.getbyte(byte_idx + 3) & 0x3F) if byte_idx + 3 < string.bytesize
+          end
+        end
+      end
+    end
+
+    class UTF_16
+      def initialize(byte_order, word_set)
+        @byte_order = byte_order
+        @word_set = word_set
+      end
+
+      def boundary?(string, byte_idx)
+        prevc = previous_codepoint(string, byte_idx)
+        nextc = next_codepoint(string, byte_idx)
+        (prevc && @word_set.has?(prevc)) ^ (nextc && @word_set.has?(nextc))
+      end
+
+      private
+
+      def previous_codepoint(string, byte_idx)
+        if byte_idx >= 2
+          low = code_unit_at(string, byte_idx - 2)
+
+          if (low & 0xFC00) == 0xDC00
+            if byte_idx >= 4
+              high = code_unit_at(string, byte_idx - 4)
+              codepoint_from(high, low) if (high & 0xFC00) == 0xD800
+            end
+          else
+            low if (low & 0xFC00) != 0xD800
+          end
+        end
+      end
+
+      def next_codepoint(string, byte_idx)
+        if byte_idx + 2 <= string.bytesize
+          high = code_unit_at(string, byte_idx)
+
+          if (high & 0xFC00) == 0xD800
+            if byte_idx + 3 < string.bytesize
+              low = code_unit_at(string, byte_idx + 2)
+              codepoint_from(high, low) if (low & 0xFC00) == 0xDC00
+            end
+          else
+            high if (high & 0xFC00) != 0xDC00
+          end
+        end
+      end
+
+      def code_unit_at(string, byte_idx)
+        @byte_order.order(string.byteslice(byte_idx, 2).bytes).pack("C2").unpack1("S<")
+      end
+
+      def codepoint_from(high, low)
+        0x10000 + ((high & 0x3FF) << 10) + (low & 0x3FF)
+      end
+    end
+
+    class UTF_32
+      def initialize(byte_order, word_set)
+        @byte_order = byte_order
+        @word_set = word_set
+      end
+
+      def boundary?(string, byte_idx)
+        prevc = (codepoint_at(string, byte_idx - 4) if byte_idx >= 4)
+        nextc = (codepoint_at(string, byte_idx) if byte_idx + 4 <= string.bytesize)
+        (prevc && @word_set.has?(prevc)) ^ (nextc && @word_set.has?(nextc))
+      end
+
+      private
+
+      def codepoint_at(string, byte_idx)
+        @byte_order.order(string.byteslice(byte_idx, 4).bytes).pack("C4").unpack1("L<")
+      end
+    end
+  end
+
   # The compiler that translates a source pattern into bytecode instructions.
   class Compiler
     # A collection of ByteSet instances to allow reuse of identical sets. This
@@ -538,20 +671,6 @@ module Exreg
 
       def add(range)
         @sets[range] ||= ByteSet[range]
-      end
-    end
-
-    # A byte order handler for little-endian encoding.
-    class ByteOrderLE
-      def order(bytes)
-        bytes
-      end
-    end
-
-    # A byte order handler for big-endian encoding.
-    class ByteOrderBE
-      def order(bytes)
-        bytes.reverse
       end
     end
 
@@ -590,6 +709,10 @@ module Exreg
       patch_insns([[leave, 2]], match_insn)
 
       @start_pc = enter
+    end
+
+    def word_boundary
+      raise InternalError, "Implemented in subclass"
     end
 
     private
@@ -755,7 +878,7 @@ module Exreg
       case node[0]
       when :seq
         compile_node_seq(node[1], options)
-      when :bol, :eol, :bos, :eos, :eosnl
+      when :bol, :eol, :bos, :eos, :eosnl, :wb, :nwb
         idx = emit_insn([node[0], -1])
         [idx, [[idx, 1]]]
       when :exact
@@ -910,6 +1033,10 @@ module Exreg
   # A UTF-8 specific compiler that handles compilation of character sets
   # into sequences of byte consumption instructions per the UTF-8 encoding.
   class Compiler::UTF_8 < Compiler
+    def word_boundary
+      WordBoundary::UTF_8.new(word_set)
+    end
+
     private
 
     def compile_set_encoded(unicode_set)
@@ -1101,6 +1228,10 @@ module Exreg
       @byte_order = byte_order
     end
 
+    def word_boundary
+      WordBoundary::UTF_16.new(@byte_order, word_set)
+    end
+
     private
 
     def stream_order(bytes)
@@ -1247,6 +1378,10 @@ module Exreg
       @byte_order = byte_order
     end
 
+    def word_boundary
+      WordBoundary::UTF_32.new(@byte_order, word_set)
+    end
+
     private
 
     def stream_order(bytes)
@@ -1391,7 +1526,8 @@ module Exreg
     end
   end
 
-  private_constant :USet, :UCD, :ByteSet, :Parser, :Compiler
+  private_constant :USet, :UCD, :ByteSet, :Parser, :ByteOrderLE, :ByteOrderBE,
+                   :WordBoundary, :Compiler
 
   # The result of a successful pattern match.
   class MatchData
@@ -1445,6 +1581,7 @@ module Exreg
       @start_pc = compiler.start_pc
       @ncaptures = compiler.ncaptures
       @named_captures = compiler.named_captures.freeze
+      @word_boundary = compiler.word_boundary
 
       freeze
     end
@@ -1608,6 +1745,10 @@ module Exreg
         yield insn[1] if string_idx == string_len
       when :eosnl
         yield insn[1] if (string_idx == string_len) || (string_idx + 1 == string_len && string.getbyte(string_idx) == "\n".ord)
+      when :wb
+        yield insn[1] if @word_boundary.boundary?(string, string_idx)
+      when :nwb
+        yield insn[1] unless @word_boundary.boundary?(string, string_idx)
       else
         raise InternalError, "Unexpected instruction: #{insn[0].inspect}"
       end
