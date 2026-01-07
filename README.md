@@ -16,7 +16,6 @@ pattern.match?("xxx abc yyy zzz") # => true
 `Exreg` implements almost all of the same features as the Unicode subset of [Onigmo](https://github.com/k-takata/Onigmo/blob/master/doc/RE), the regular expression library used in Ruby. This includes everything except the following major features:
 
 * Full case folding (only common case folding is supported)
-* Word boundaries and non-word boundaries (`\b`, `\B`)
 * Look-ahead and look-behind assertions (`(?=subexp)`, `(?!subexp)`, `(?<=subexp)`, `(?<!subexp)`)
 * Backreferences (`\n`, `\k<n>`, etc.)
 

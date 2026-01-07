@@ -427,6 +427,113 @@ module Exreg
       refute_match("\\A\\z", "a")
     end
 
+    def test_word_boundary_basic
+      # Basic word boundary at start
+      assert_match("\\bword", "word")
+      assert_match("\\bword", "a word here")
+      refute_match("\\bword", "sword")
+      
+      # Basic word boundary at end
+      assert_match("word\\b", "word")
+      assert_match("word\\b", "word here")
+      refute_match("word\\b", "words")
+      
+      # Word boundary on both sides
+      assert_match("\\bword\\b", "word")
+      assert_match("\\bword\\b", "a word here")
+      refute_match("\\bword\\b", "sword")
+      refute_match("\\bword\\b", "words")
+      refute_match("\\bword\\b", "swordsmith")
+    end
+
+    def test_word_boundary_edges
+      # Word boundary at start of string
+      assert_match("\\btest", "test")
+      refute_match("\\btest", "atest")
+      
+      # Word boundary at end of string
+      assert_match("test\\b", "test")
+      refute_match("test\\b", "testa")
+      
+      # Both boundaries at string edges
+      assert_match("\\btest\\b", "test")
+      refute_match("\\btest\\b", "atest")
+      refute_match("\\btest\\b", "testa")
+      refute_match("\\btest\\b", "atesta")
+    end
+
+    def test_word_boundary_with_punctuation
+      # Word boundaries with punctuation
+      assert_match("\\bword\\b", "word.")
+      assert_match("\\bword\\b", ".word")
+      assert_match("\\bword\\b", ".word.")
+      assert_match("\\bword\\b", "word!")
+      assert_match("\\bword\\b", "word?")
+      assert_match("\\bword\\b", "(word)")
+      assert_match("\\bword\\b", "word,test")
+    end
+
+    def test_word_boundary_with_digits
+      # Digits are word characters
+      assert_match("\\b123\\b", "abc 123 def")
+      assert_match("\\b\\d+\\b", "test 42 end")
+      refute_match("\\b123\\b", "abc1234def")
+    end
+
+    def test_word_boundary_with_underscore
+      # Underscore is a word character
+      assert_match("\\b_test\\b", "_test")
+      assert_match("\\btest_\\b", "test_")
+      assert_match("\\btest_var\\b", "test_var")
+      refute_match("\\btest\\b", "test_var")
+    end
+
+    def test_word_boundary_empty_match
+      # Word boundary matches zero-width position at word transitions
+      assert_match("\\b", "word")
+      assert_match("\\b", "a b")
+      # A space-only string has no word boundaries
+      refute_match("\\b", " ")
+    end
+
+    def test_word_boundary_unicode
+      # Test with non-ASCII letters (Greek, Cyrillic, etc.)
+      assert_match("\\bλόγος\\b", "λόγος")
+      assert_match("\\bλόγος\\b", "το λόγος είναι")
+      refute_match("\\bλόγος\\b", "αλόγος")
+      
+      # Test with Cyrillic
+      assert_match("\\bпривет\\b", "привет")
+      assert_match("\\bпривет\\b", "это привет мир")
+      refute_match("\\bпривет\\b", "приветствие")
+      
+      # Test with CJK characters (they are letters, so word characters)
+      # Word boundary requires space or punctuation
+      assert_match("\\b世界\\b", "世界")
+      assert_match("\\b世界\\b", " 世界 ")
+      refute_match("\\b世界\\b", "你好世界") # No boundary between CJK letters
+      
+      # Test with Arabic
+      assert_match("\\bمرحبا\\b", "مرحبا")
+      assert_match("\\bمرحبا\\b", "هذا مرحبا عالم")
+      
+      # Test with emoji and special characters (not word characters)
+      assert_match("\\btest\\b", "test😀")
+      assert_match("\\btest\\b", "😀test")
+    end
+
+    def test_word_boundary_unicode_mixed
+      # Test mixing ASCII and Unicode
+      assert_match("\\btest\\b", "test λόγος")
+      assert_match("\\bλόγος\\b", "test λόγος")
+      refute_match("\\btest\\b", "testλόγος")
+      
+      # Test with diacritics (marks are word characters)
+      assert_match("\\bcafé\\b", "café")
+      assert_match("\\bcafé\\b", "au café")
+      refute_match("\\bcafé\\b", "cafétéria")
+    end
+
     def test_multibyte_characters
       assert_match("あい", "あい")
       assert_match("あい", "うあいえ")
@@ -1597,6 +1704,27 @@ module Exreg
       assert(pattern.match?("𐀿".encode(Encoding::UTF_32LE)))
       refute(pattern.match?("a".encode(Encoding::UTF_32LE)))
     end
+
+    def test_word_boundary_ascii
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_32LE)
+      assert(pattern.match?("test".encode(Encoding::UTF_32LE)))
+      assert(pattern.match?("a test b".encode(Encoding::UTF_32LE)))
+      refute(pattern.match?("testing".encode(Encoding::UTF_32LE)))
+      refute(pattern.match?("contest".encode(Encoding::UTF_32LE)))
+    end
+
+    def test_word_boundary_unicode
+      pattern = Pattern.new("\\bλόγος\\b", Option::NONE, Encoding::UTF_32LE)
+      assert(pattern.match?("λόγος".encode(Encoding::UTF_32LE)))
+      assert(pattern.match?("το λόγος είναι".encode(Encoding::UTF_32LE)))
+      refute(pattern.match?("αλόγος".encode(Encoding::UTF_32LE)))
+    end
+
+    def test_word_boundary_mixed
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_32LE)
+      assert(pattern.match?("test λόγος".encode(Encoding::UTF_32LE)))
+      refute(pattern.match?("testλόγος".encode(Encoding::UTF_32LE)))
+    end
   end
 
   class UTF32BETest < ExregTest
@@ -1780,6 +1908,27 @@ module Exreg
       assert(pattern.match?("𐀀".encode(Encoding::UTF_32BE)))
       assert(pattern.match?("𐀿".encode(Encoding::UTF_32BE)))
       refute(pattern.match?("a".encode(Encoding::UTF_32BE)))
+    end
+
+    def test_word_boundary_ascii
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_32BE)
+      assert(pattern.match?("test".encode(Encoding::UTF_32BE)))
+      assert(pattern.match?("a test b".encode(Encoding::UTF_32BE)))
+      refute(pattern.match?("testing".encode(Encoding::UTF_32BE)))
+      refute(pattern.match?("contest".encode(Encoding::UTF_32BE)))
+    end
+
+    def test_word_boundary_unicode
+      pattern = Pattern.new("\\bпривет\\b", Option::NONE, Encoding::UTF_32BE)
+      assert(pattern.match?("привет".encode(Encoding::UTF_32BE)))
+      assert(pattern.match?("это привет мир".encode(Encoding::UTF_32BE)))
+      refute(pattern.match?("приветствие".encode(Encoding::UTF_32BE)))
+    end
+
+    def test_word_boundary_mixed
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_32BE)
+      assert(pattern.match?("test привет".encode(Encoding::UTF_32BE)))
+      refute(pattern.match?("testпривет".encode(Encoding::UTF_32BE)))
     end
   end
 
@@ -1965,6 +2114,27 @@ module Exreg
       refute(pattern.match?("\u{FFFC}".encode(Encoding::UTF_16LE)))
       refute(pattern.match?("\u{10002}".encode(Encoding::UTF_16LE)))
     end
+
+    def test_word_boundary_ascii
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_16LE)
+      assert(pattern.match?("test".encode(Encoding::UTF_16LE)))
+      assert(pattern.match?("a test b".encode(Encoding::UTF_16LE)))
+      refute(pattern.match?("testing".encode(Encoding::UTF_16LE)))
+      refute(pattern.match?("contest".encode(Encoding::UTF_16LE)))
+    end
+
+    def test_word_boundary_unicode
+      pattern = Pattern.new("\\bمرحبا\\b", Option::NONE, Encoding::UTF_16LE)
+      assert(pattern.match?("مرحبا".encode(Encoding::UTF_16LE)))
+      assert(pattern.match?("مرحبا عالم".encode(Encoding::UTF_16LE)))
+      refute(pattern.match?("أمرحبا".encode(Encoding::UTF_16LE)))
+    end
+
+    def test_word_boundary_with_emoji
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_16LE)
+      assert(pattern.match?("test😀".encode(Encoding::UTF_16LE)))
+      assert(pattern.match?("😀test".encode(Encoding::UTF_16LE)))
+    end
   end
 
   class UTF16BETest < ExregTest
@@ -2143,6 +2313,27 @@ module Exreg
       assert(pattern.match?("\u{10001}".encode(Encoding::UTF_16BE)))
       refute(pattern.match?("\u{FFFC}".encode(Encoding::UTF_16BE)))
       refute(pattern.match?("\u{10002}".encode(Encoding::UTF_16BE)))
+    end
+
+    def test_word_boundary_ascii
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_16BE)
+      assert(pattern.match?("test".encode(Encoding::UTF_16BE)))
+      assert(pattern.match?("a test b".encode(Encoding::UTF_16BE)))
+      refute(pattern.match?("testing".encode(Encoding::UTF_16BE)))
+      refute(pattern.match?("contest".encode(Encoding::UTF_16BE)))
+    end
+
+    def test_word_boundary_unicode
+      pattern = Pattern.new("\\bשלום\\b", Option::NONE, Encoding::UTF_16BE)
+      assert(pattern.match?("שלום".encode(Encoding::UTF_16BE)))
+      assert(pattern.match?("שלום עולם".encode(Encoding::UTF_16BE)))
+      refute(pattern.match?("שלומות".encode(Encoding::UTF_16BE)))
+    end
+
+    def test_word_boundary_with_punctuation
+      pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_16BE)
+      assert(pattern.match?("test.".encode(Encoding::UTF_16BE)))
+      assert(pattern.match?(".test.".encode(Encoding::UTF_16BE)))
     end
   end
 end
