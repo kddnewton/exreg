@@ -296,6 +296,30 @@ module Exreg
       @bitmaps.all?(&:zero?)
     end
 
+    # Return the single byte value if exactly one byte is set, nil otherwise.
+    def single
+      count = 0
+      single = nil
+      @bitmaps.each_with_index do |bitmap, idx|
+        next if bitmap == 0
+        b = bitmap
+        while b != 0
+          count += 1
+          return nil if count > 1
+          single = idx * 32 + (b & -b).bit_length - 1
+          b &= b - 1
+        end
+      end
+      single
+    end
+
+    # Perform a union with another ByteSet, returning a new ByteSet that
+    # contains all bytes in either set.
+    def union(other)
+      ByteSet.new(@bitmaps.zip(other.bitmaps).map { |a, b| a | b })
+    end
+    alias | union
+
     # Create and return a new ByteSet that is the inversion of this set.
     def invert
       ByteSet.new(@bitmaps.map { |bitmap| ~bitmap & 0xFFFFFFFF })
@@ -1659,6 +1683,12 @@ module Exreg
         @dfa_states = {}
       end
 
+      @literal_prefix = extract_literal_prefix
+      if @literal_prefix.empty?
+        @literal_prefix = nil
+        @first_byte_set = extract_first_byte_set
+      end
+
       freeze
     end
 
@@ -1668,7 +1698,7 @@ module Exreg
       string_len = string.bytesize
 
       if @dfa_eligible
-        (string_len + 1).times do |string_idx|
+        each_start_position(string, string_len) do |string_idx|
           if dfa_match_at(string, string_idx, string_len)
             match = match_at(string, string_idx, string_len)
             return match if match
@@ -1676,10 +1706,11 @@ module Exreg
         end
         nil
       else
-        (string_len + 1).times.find do |string_idx|
+        each_start_position(string, string_len) do |string_idx|
           match = match_at(string, string_idx, string_len)
-          break match if match
+          return match if match
         end
+        nil
       end
     end
 
@@ -1687,15 +1718,150 @@ module Exreg
     def match?(string)
       if @dfa_eligible
         string_len = string.bytesize
-        (string_len + 1).times.any? do |string_idx|
-          dfa_match_at(string, string_idx, string_len)
+        each_start_position(string, string_len) do |string_idx|
+          return true if dfa_match_at(string, string_idx, string_len)
         end
+        false
       else
         !match(string).nil?
       end
     end
 
     private
+
+    def each_start_position(string, string_len)
+      if @literal_prefix
+        binary = string.b
+        pos = binary.index(@literal_prefix, 0)
+        while pos
+          yield pos
+          pos = binary.index(@literal_prefix, pos + 1)
+        end
+      elsif @first_byte_set
+        string_len.times do |idx|
+          yield idx if @first_byte_set.has?(string.getbyte(idx))
+        end
+        yield string_len
+      else
+        (string_len + 1).times { |idx| yield idx }
+      end
+    end
+
+    # Walk the NFA from @start_pc through epsilon transitions to find a
+    # common literal byte prefix that every match must start with. Returns a
+    # frozen binary string (possibly empty).
+    def extract_literal_prefix
+      prefix = []
+      pc = @start_pc
+      seen_pcs = Set.new
+
+      loop do
+        break if seen_pcs.include?(pc)
+        seen_pcs.add(pc)
+        # Walk epsilon closure from pc, collecting all reachable consume instructions.
+        stack = [pc]
+        visited = Set.new
+        consume_insns = []
+
+        while (current = stack.pop)
+          next if visited.include?(current)
+          visited.add(current)
+
+          case (insn = @insns[current])[0]
+          when :consume_exact, :consume_set
+            consume_insns << insn
+          when :match
+            # A match is reachable — the prefix could be empty, stop here.
+            return prefix.pack("C*").freeze
+          when :split
+            stack << insn[1]
+            stack << insn[2]
+          when :jmp
+            stack << insn[1]
+          when :save
+            stack << insn[2]
+          else
+            # Anchors — treat as epsilon
+            stack << insn[1]
+          end
+        end
+
+        break if consume_insns.empty?
+
+        # Check if all consume instructions agree on the same single byte
+        # and the same next PC.
+        byte = nil
+        next_pc = nil
+        all_same = true
+
+        consume_insns.each do |insn|
+          insn_byte =
+            case insn[0]
+            when :consume_exact then insn[1]
+            when :consume_set then insn[1].single
+            end
+
+          if insn_byte.nil? || insn_byte > 255
+            all_same = false
+            break
+          elsif byte.nil?
+            byte = insn_byte
+            next_pc = insn[2]
+          elsif byte != insn_byte || next_pc != insn[2]
+            all_same = false
+            break
+          end
+        end
+
+        break unless all_same && byte
+
+        prefix << byte
+        pc = next_pc
+      end
+
+      prefix.pack("C*").freeze
+    end
+
+    # Walk the NFA from @start_pc through epsilon transitions and union all
+    # bytes from reachable consume instructions into a ByteSet. Returns nil if
+    # a zero-length match is possible or all 256 bytes are present.
+    def extract_first_byte_set
+      stack = [@start_pc]
+      visited = Set.new
+      result = ByteSet.new
+
+      while (current = stack.pop)
+        next if visited.include?(current)
+        visited.add(current)
+
+        case (insn = @insns[current])[0]
+        when :consume_exact
+          byte = insn[1]
+          return nil if byte > 255
+          result = result | ByteSet[byte..byte]
+        when :consume_set
+          result = result | insn[1]
+        when :match
+          # Zero-length match possible — all positions are candidates.
+          return nil
+        when :split
+          stack << insn[1]
+          stack << insn[2]
+        when :jmp
+          stack << insn[1]
+        when :save
+          stack << insn[2]
+        else
+          # Anchors — treat as epsilon
+          stack << insn[1]
+        end
+      end
+
+      # If all 256 bits are set, the set is useless.
+      return nil if result == ByteSet[0..255]
+
+      result
+    end
 
     def match_at(string, start_idx, string_len)
       last_match = nil
