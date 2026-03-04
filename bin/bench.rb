@@ -45,7 +45,7 @@ LONG_ALPHA = ("abcdefghij" * 100)
 DNA_TEXT = (["ACGT"] * 250).map { |s| s.chars.sample }.join
 UNICODE_TEXT = "café résumé naïve über Ñoño 日本語テスト Привет мир " * 10
 
-ITERATIONS = 10
+ITERATIONS = 1_000
 
 # ---------------------------------------------------------------------------
 # Benchmark runners
@@ -62,9 +62,9 @@ def run_match_bool(name, pattern, haystack, options: Exreg::Option::NONE)
   exreg_time = Benchmark.realtime { ITERATIONS.times { exreg.match?(haystack) } }
   ruby_time = Benchmark.realtime { ITERATIONS.times { ruby.match?(haystack) } }
 
-  exreg_ms = (exreg_time * 1000).round(2)
-  ruby_ms = (ruby_time * 1000).round(2)
-  ratio = ruby_ms > 0 ? (exreg_ms / ruby_ms).round(1) : Float::INFINITY
+  exreg_ms = exreg_time * 1000
+  ruby_ms = ruby_time * 1000
+  ratio = ruby_ms > 0 ? exreg_ms / ruby_ms : Float::INFINITY
 
   [name, ruby_ms, exreg_ms, ratio]
 end
@@ -80,20 +80,23 @@ def run_match_capture(name, pattern, haystack, options: Exreg::Option::NONE)
   exreg_time = Benchmark.realtime { ITERATIONS.times { exreg.match(haystack) } }
   ruby_time = Benchmark.realtime { ITERATIONS.times { ruby.match(haystack) } }
 
-  exreg_ms = (exreg_time * 1000).round(2)
-  ruby_ms = (ruby_time * 1000).round(2)
-  ratio = ruby_ms > 0 ? (exreg_ms / ruby_ms).round(1) : Float::INFINITY
+  exreg_ms = exreg_time * 1000
+  ruby_ms = ruby_time * 1000
+  ratio = ruby_ms > 0 ? exreg_ms / ruby_ms : Float::INFINITY
 
   [name, ruby_ms, exreg_ms, ratio]
 end
 
 def print_table(title, header, rows)
-  fmt = "%-42s %10s %10s %8s"
+  fmt = "%-42s %11s %11s %8s"
   puts title
-  puts "-" * 74
+  puts "-" * 76
   puts fmt % header
-  puts "-" * 74
-  rows.each { |r| puts fmt % [r[0], r[1], r[2], "#{r[3]}x"] }
+  puts "-" * 76
+  rows.each do |r|
+    ratio_str = r[3] == Float::INFINITY ? "Inf" : "%.1f" % r[3]
+    puts fmt % [r[0], "%.2f" % r[1], "%.2f" % r[2], "#{ratio_str}x"]
+  end
   puts
 end
 
@@ -102,7 +105,7 @@ end
 # ---------------------------------------------------------------------------
 
 puts "Exreg vs Ruby Regexp"
-puts "=" * 74
+puts "=" * 76
 puts "Ruby: #{RUBY_DESCRIPTION}"
 puts "Iterations: #{ITERATIONS}"
 puts "Haystack sizes: mixed=#{MIXED_TEXT.bytesize}B, short=#{SHORT_TEXT.bytesize}B, " \
@@ -188,9 +191,9 @@ results3 = []
   exreg_time = Benchmark.realtime { ITERATIONS.times { strings_50.each { |s| exreg.match?(s) } } }
   ruby_time = Benchmark.realtime { ITERATIONS.times { strings_50.each { |s| ruby.match?(s) } } }
 
-  exreg_ms = (exreg_time * 1000).round(2)
-  ruby_ms = (ruby_time * 1000).round(2)
-  ratio = ruby_ms > 0 ? (exreg_ms / ruby_ms).round(1) : Float::INFINITY
+  exreg_ms = exreg_time * 1000
+  ruby_ms = ruby_time * 1000
+  ratio = ruby_ms > 0 ? exreg_ms / ruby_ms : Float::INFINITY
   results3 << [name, ruby_ms, exreg_ms, ratio]
 end
 
@@ -200,7 +203,7 @@ print_table(
   results3
 )
 
-puts "=" * 74
+puts "=" * 76
 puts
 puts "Legend:"
 puts "  Regexp = Ruby's built-in Regexp (Oniguruma, C implementation)"
