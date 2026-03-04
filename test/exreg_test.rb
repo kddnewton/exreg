@@ -8,8 +8,8 @@ module Exreg
     private
 
     def assert_match(pattern, string, options = Option::NONE)
-      assert_operator(Pattern.new(pattern, options), :match, string) { "Expected '#{string}' to match pattern '#{pattern}'" }
-      assert_operator(Regexp.new("(?u)#{pattern}", options), :match, string) { "Expected '#{string}' to match pattern '#{pattern}'" }
+      assert_operator(Pattern.new(pattern, options), :match, string, "Expected '#{string}' to match pattern '#{pattern}'")
+      assert_operator(Regexp.new("(?u)#{pattern}", options), :match, string, "Expected '#{string}' to match pattern '#{pattern}'")
     end
 
     def refute_match(pattern, string, options = Option::NONE)
@@ -2334,6 +2334,106 @@ module Exreg
       pattern = Pattern.new("\\btest\\b", Option::NONE, Encoding::UTF_16BE)
       assert(pattern.match?("test.".encode(Encoding::UTF_16BE)))
       assert(pattern.match?(".test.".encode(Encoding::UTF_16BE)))
+    end
+  end
+
+  class DFATest < ExregTest
+    def test_match_boolean
+      assert(Pattern.new("a+").match?("aaa"))
+      assert(Pattern.new("a+").match?("baaab"))
+      refute(Pattern.new("a+").match?("bbb"))
+    end
+
+    def test_match_with_captures
+      match = Pattern.new("(a+)").match("baaab")
+      refute_nil(match)
+      assert_equal("aaa", match[0])
+      assert_equal("aaa", match[1])
+    end
+
+    def test_literal_in_long_string
+      pattern = Pattern.new("needle")
+      assert(pattern.match?("hay" * 100 + "needle" + "hay" * 100))
+      refute(pattern.match?("hay" * 1000))
+    end
+
+    def test_anchors_with_dfa
+      assert(Pattern.new("\\Afoo").match?("foobar"))
+      refute(Pattern.new("\\Afoo").match?("barfoo"))
+      assert(Pattern.new("foo\\z").match?("barfoo"))
+      refute(Pattern.new("foo\\z").match?("foobar"))
+    end
+
+    def test_eosnl_anchor_with_dfa
+      pattern = Pattern.new("a\\Z")
+      assert(pattern.match?("a"))
+      assert(pattern.match?("a\n"))
+      refute(pattern.match?("ab"))
+      refute(pattern.match?("a\nb"))
+    end
+
+    def test_bol_eol_with_dfa
+      pattern = Pattern.new("^foo$", Option::MULTILINE)
+      assert(pattern.match?("foo"))
+      assert(pattern.match?("bar\nfoo\nbaz"))
+      refute(pattern.match?("foobar"))
+    end
+
+    def test_word_boundary_with_dfa
+      pattern = Pattern.new("\\bfoo\\b")
+      assert(pattern.match?("foo"))
+      assert(pattern.match?("bar foo baz"))
+      refute(pattern.match?("foobar"))
+      refute(pattern.match?("barfoo"))
+    end
+
+    def test_zero_length_match
+      assert(Pattern.new("a*").match?(""))
+      assert(Pattern.new("a*").match?("bbb"))
+
+      match = Pattern.new("a*").match("")
+      refute_nil(match)
+      assert_equal("", match[0])
+    end
+
+    def test_alternation
+      pattern = Pattern.new("cat|dog")
+      assert(pattern.match?("the cat sat"))
+      assert(pattern.match?("the dog sat"))
+      refute(pattern.match?("the bird sat"))
+    end
+
+    def test_character_class
+      pattern = Pattern.new("[a-z]+\\d+")
+      assert(pattern.match?("abc123"))
+      refute(pattern.match?("123"))
+    end
+
+    def test_atomic_falls_back_to_nfa
+      pattern = Pattern.new("(?>a+)")
+      assert(pattern.match?("aaa"))
+      refute(pattern.match?("bbb"))
+    end
+
+    def test_possessive_falls_back_to_nfa
+      # a++ consumes all 'a's possessively, won't backtrack to give one up
+      # for 'a' to match, so a++a should not match "aaa"
+      pattern = Pattern.new("a++a")
+      refute(pattern.match?("aaa"))
+    end
+
+    def test_dfa_cache_reuse
+      pattern = Pattern.new("[a-z]+")
+      # Matching multiple times should reuse DFA cache
+      assert(pattern.match?("hello"))
+      assert(pattern.match?("world"))
+      refute(pattern.match?("12345"))
+    end
+
+    def test_unicode_with_dfa
+      pattern = Pattern.new("\\w+")
+      assert(pattern.match?("caf\u00e9"))
+      assert(pattern.match?("\u00e9clairs"))
     end
   end
 end

@@ -1552,6 +1552,74 @@ module Exreg
     end
   end
 
+  # Bitmask constants for the lazy DFA.
+  module DFA
+    # Bits for detect_anchor_types: which anchor instructions exist in the
+    # pattern. Used to skip unnecessary context computation.
+    module AnchorType
+      BOL           = 1 << 0 # pattern contains ^ (beginning of line)
+      EOL           = 1 << 1 # pattern contains $ (end of line)
+      BOS           = 1 << 2 # pattern contains \A (beginning of string)
+      EOS           = 1 << 3 # pattern contains \z (end of string)
+      EOSNL         = 1 << 4 # pattern contains \Z (end of string or before final \n)
+      WORD_BOUNDARY = 1 << 5 # pattern contains \b or \B
+    end
+
+    # Bits for compute_context: which positional conditions hold at a given
+    # byte index. Included in the DFA cache key so transitions that depend
+    # on anchors are correctly distinguished.
+    module Context
+      AT_START       = 1 << 0 # string_idx == 0
+      PREV_NEWLINE   = 1 << 1 # previous byte was \n
+      AT_END         = 1 << 2 # string_idx == string_len
+      CURR_NEWLINE   = 1 << 3 # current byte is \n
+      PENULTIMATE    = 1 << 4 # string_idx + 1 == string_len
+      WORD_BOUNDARY  = 1 << 5 # at a word boundary
+    end
+  end
+
+  # A DFA state is a set of NFA program counters (at consume instructions)
+  # after epsilon closure, plus whether the closure reached a match state.
+  class DFAState
+    attr_reader :pc_set, :is_match
+
+    def initialize(pc_set, is_match)
+      @pc_set = pc_set
+      @is_match = is_match
+      @hash = pc_set.hash
+      freeze
+    end
+
+    def hash = @hash
+    def eql?(other) = @pc_set == other.pc_set
+    def dead? = @pc_set.empty?
+  end
+
+  # An LRU cache for DFA transitions. Keys are [DFAState, context_flags]
+  # pairs, values are 256-element arrays mapping byte values to next DFAState.
+  class DFACache
+    def initialize(max_size = 512)
+      @max_size = max_size
+      @cache = {}
+    end
+
+    def lookup(state, context, byte)
+      key = [state, context]
+      if (transitions = @cache.delete(key))
+        @cache[key] = transitions
+        transitions[byte]
+      end
+    end
+
+    def store(state, context, byte, next_state)
+      key = [state, context]
+      transitions = @cache.delete(key) || Array.new(256)
+      transitions[byte] = next_state
+      @cache[key] = transitions
+      @cache.delete(@cache.first[0]) if @cache.size > @max_size
+    end
+  end
+
   # Options that can be used when creating patterns.
   module Option
     # No special options.
@@ -1583,6 +1651,14 @@ module Exreg
       @named_captures = compiler.named_captures.freeze
       @word_boundary = compiler.word_boundary
 
+      @dfa_eligible = @insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
+
+      if @dfa_eligible
+        @anchor_types = detect_anchor_types
+        @dfa_cache = DFACache.new
+        @dfa_states = {}
+      end
+
       freeze
     end
 
@@ -1590,15 +1666,33 @@ module Exreg
     # found, a MatchData instance is returned; otherwise, nil is returned.
     def match(string)
       string_len = string.bytesize
-      (string_len + 1).times.find do |string_idx|
-        match = match_at(string, string_idx, string_len)
-        break match if match
+
+      if @dfa_eligible
+        (string_len + 1).times do |string_idx|
+          if dfa_match_at(string, string_idx, string_len)
+            match = match_at(string, string_idx, string_len)
+            return match if match
+          end
+        end
+        nil
+      else
+        (string_len + 1).times.find do |string_idx|
+          match = match_at(string, string_idx, string_len)
+          break match if match
+        end
       end
     end
 
     # True if the pattern matches the given string.
     def match?(string)
-      !match(string).nil?
+      if @dfa_eligible
+        string_len = string.bytesize
+        (string_len + 1).times.any? do |string_idx|
+          dfa_match_at(string, string_idx, string_len)
+        end
+      else
+        !match(string).nil?
+      end
     end
 
     private
@@ -1752,6 +1846,153 @@ module Exreg
       else
         raise InternalError, "Unexpected instruction: #{insn[0].inspect}"
       end
+    end
+
+    # Detect which anchor instruction types exist in the pattern. Returns a
+    # bitmask so compute_context can skip unnecessary work.
+    def detect_anchor_types
+      types = 0
+      @insns.each do |insn|
+        case insn[0]
+        when :bol then types |= DFA::AnchorType::BOL
+        when :eol then types |= DFA::AnchorType::EOL
+        when :bos then types |= DFA::AnchorType::BOS
+        when :eos then types |= DFA::AnchorType::EOS
+        when :eosnl then types |= DFA::AnchorType::EOSNL
+        when :wb, :nwb then types |= DFA::AnchorType::WORD_BOUNDARY
+        end
+      end
+      types
+    end
+
+    # Compute position-dependent context flags for DFA epsilon closure. Only
+    # computes flags for anchor types actually used by the pattern.
+    def compute_context(string, string_idx, string_len)
+      return 0 if @anchor_types == 0
+
+      ctx = 0
+
+      if @anchor_types & (DFA::AnchorType::BOL | DFA::AnchorType::BOS) != 0
+        ctx |= DFA::Context::AT_START if string_idx == 0
+      end
+
+      if @anchor_types & DFA::AnchorType::BOL != 0
+        ctx |= DFA::Context::PREV_NEWLINE if string_idx > 0 && string.getbyte(string_idx - 1) == 0x0A
+      end
+
+      if @anchor_types & (DFA::AnchorType::EOL | DFA::AnchorType::EOS | DFA::AnchorType::EOSNL) != 0
+        ctx |= DFA::Context::AT_END if string_idx == string_len
+      end
+
+      if @anchor_types & (DFA::AnchorType::EOL | DFA::AnchorType::EOSNL) != 0
+        ctx |= DFA::Context::CURR_NEWLINE if string_idx < string_len && string.getbyte(string_idx) == 0x0A
+      end
+
+      if @anchor_types & DFA::AnchorType::EOSNL != 0
+        ctx |= DFA::Context::PENULTIMATE if string_idx + 1 == string_len
+      end
+
+      if @anchor_types & DFA::AnchorType::WORD_BOUNDARY != 0
+        ctx |= DFA::Context::WORD_BOUNDARY if @word_boundary.boundary?(string, string_idx)
+      end
+
+      ctx
+    end
+
+    # Capture-free epsilon closure for DFA. Returns a DFAState representing
+    # the set of NFA PCs at consume instructions reachable from the given PCs.
+    def dfa_closure(pcs, string, string_idx, string_len)
+      consume_pcs = []
+      stack = pcs.dup
+      visited = Set.new
+      is_match = false
+
+      while (pc = stack.pop)
+        next if visited.include?(pc)
+        visited.add(pc)
+
+        case (insn = @insns[pc])[0]
+        when :consume_exact, :consume_set
+          consume_pcs << pc
+        when :match
+          is_match = true
+        when :save
+          stack << insn[2]
+        when :split
+          stack << insn[1]
+          stack << insn[2]
+        when :jmp
+          stack << insn[1]
+        else
+          next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << next_pc }
+        end
+      end
+
+      consume_pcs.sort!.freeze
+      intern_dfa_state(consume_pcs, is_match)
+    end
+
+    # Intern DFA states so equal (pc_set, is_match) pairs share the same
+    # object. The same pc_set can have different is_match values depending
+    # on which epsilon transitions were followed to reach the consume states.
+    def intern_dfa_state(sorted_pcs, is_match)
+      key = [sorted_pcs, is_match]
+      if (existing = @dfa_states[key])
+        existing
+      else
+        state = DFAState.new(sorted_pcs, is_match)
+        @dfa_states[key] = state
+        state
+      end
+    end
+
+    # DFA matching loop. Returns the end position of the match (Integer) or
+    # nil if no match exists starting at start_idx.
+    def dfa_match_at(string, start_idx, string_len)
+      state = dfa_closure([@start_pc], string, start_idx, string_len)
+
+      return nil if state.dead? && !state.is_match
+
+      last_match_end = state.is_match ? start_idx : nil
+
+      string_idx = start_idx
+      while string_idx < string_len
+        byte = string.getbyte(string_idx)
+        next_ctx = compute_context(string, string_idx + 1, string_len)
+
+        # Cache key uses next position's context since the epsilon closure
+        # that produces next_state runs at string_idx + 1.
+        next_state = @dfa_cache.lookup(state, next_ctx, byte)
+
+        unless next_state
+          raw_next_pcs = []
+          state.pc_set.each do |pc|
+            insn = @insns[pc]
+            case insn[0]
+            when :consume_exact
+              raw_next_pcs << insn[2] if insn[1] == byte
+            when :consume_set
+              raw_next_pcs << insn[2] if insn[1].has?(byte)
+            end
+          end
+
+          next_state = dfa_closure(raw_next_pcs, string, string_idx + 1, string_len)
+          @dfa_cache.store(state, next_ctx, byte, next_state)
+        end
+
+        state = next_state
+        string_idx += 1
+        last_match_end = string_idx if state.is_match
+        break if state.dead?
+      end
+
+      # Check for match at EOF (for anchors like $, \z, \Z)
+      if !state.dead? && !state.is_match
+        eof_state = dfa_closure(state.pc_set.to_a, string, string_idx, string_len)
+        last_match_end = string_idx if eof_state.is_match
+      end
+
+      last_match_end
     end
   end
 end
