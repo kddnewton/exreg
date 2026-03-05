@@ -1723,6 +1723,7 @@ module Exreg
         @anchor_types = detect_anchor_types
         @dfa_states = {}
         @dfa_visited = Array.new(@insns.length)
+        @dfa_next_pcs = []
         @dfa_initial_state = @anchor_types == 0 ? dfa_closure([@start_pc], "".b, 0, 0) : nil
       end
 
@@ -2158,25 +2159,25 @@ module Exreg
       string_idx = start_idx
       while string_idx < string_len
         byte = string.getbyte(string_idx)
-        next_ctx = compute_context(string, string_idx + 1, string_len)
+        next_ctx = @anchor_types == 0 ? 0 : compute_context(string, string_idx + 1, string_len)
 
         # Cache key uses next position's context since the epsilon closure
         # that produces next_state runs at string_idx + 1.
         next_state = state.next_state(next_ctx, byte)
 
         unless next_state
-          raw_next_pcs = []
+          @dfa_next_pcs.clear
           state.pc_set.each do |pc|
             insn = @insns[pc]
             case insn[0]
             when :consume_exact
-              raw_next_pcs << insn[2] if insn[1] == byte
+              @dfa_next_pcs << insn[2] if insn[1] == byte
             when :consume_set
-              raw_next_pcs << insn[2] if insn[1].has?(byte)
+              @dfa_next_pcs << insn[2] if insn[1].has?(byte)
             end
           end
 
-          next_state = dfa_closure(raw_next_pcs, string, string_idx + 1, string_len)
+          next_state = dfa_closure(@dfa_next_pcs, string, string_idx + 1, string_len)
           state.set_next_state(next_ctx, byte, next_state)
         end
 
