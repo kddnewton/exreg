@@ -1915,6 +1915,18 @@ module Exreg
       end
     end
 
+    # A start strategy for patterns anchored at the beginning of the string
+    # (\A). Only yields position 0.
+    class BeginningOfString
+      def initialize
+        freeze
+      end
+
+      def each_pos(string, string_len)
+        yield 0
+      end
+    end
+
     # A start strategy that matches any position (e.g. from a pattern that
     # starts with a zero-width assertion or an unanchored consume).
     class Any
@@ -2574,7 +2586,9 @@ module Exreg
 
       @required_literal = compiler.required_literal
       @start =
-        if !(prefix = extract_start_prefix(insns, start_pc)).empty?
+        if bos_anchored?(insns, start_pc)
+          Start::BeginningOfString.new
+        elsif !(prefix = extract_start_prefix(insns, start_pc)).empty?
           Start::Prefix.new(prefix)
         elsif (literals = compiler.alternation_prefixes)
           Start::Literals.new(literals)
@@ -2615,7 +2629,41 @@ module Exreg
 
     private
 
-    # Walk the NFA from start_pc through epsilon transitions to find a
+    # Returns true if every path from start_pc passes through a :bos
+    # instruction before reaching any consume instruction. This means the
+    # pattern can only match at position 0.
+    def bos_anchored?(insns, start_pc)
+      found_bos = false
+      stack = [start_pc]
+      visited = Set.new
+
+      while (pc = stack.pop)
+        next if visited.include?(pc)
+        visited.add(pc)
+
+        case insns[pc][0]
+        when :bos
+          found_bos = true
+        when :consume_exact, :consume_set
+          return false # Reached a consume without hitting :bos
+        when :match
+          next
+        when :split
+          stack << insns[pc][1]
+          stack << insns[pc][2]
+        when :jmp
+          stack << insns[pc][1]
+        when :save
+          stack << insns[pc][2]
+        else
+          # Other zero-width assertions (:bol, :eos, :eol, etc.)
+          stack << insns[pc][1]
+        end
+      end
+
+      found_bos
+    end
+
     # common literal byte prefix that every match must start with. Returns a
     # frozen binary string (possibly empty).
     def extract_start_prefix(insns, start_pc)
