@@ -1974,9 +1974,49 @@ module Exreg
       end
     end
 
-    class DFA < Base
+    class DFA
+      def initialize(initial_state, dead_state, nfa)
+        @initial_state = initial_state
+        @dead_state = dead_state
+        @nfa = nfa
+      end
+
+      def match_at(string, start_idx, string_len)
+        match_end = run(string, start_idx, string_len)
+        @nfa.match_at(string, start_idx, string_len) if match_end
+      end
+
+      def match_at?(string, start_idx, string_len)
+        !run(string, start_idx, string_len).nil?
+      end
+
+      private
+
+      def run(string, start_idx, string_len)
+        state = @initial_state
+        dead = @dead_state
+        last_match_end = state.is_match ? start_idx : nil
+
+        string_idx = start_idx
+        while string_idx < string_len
+          state = state.transitions[string.getbyte(string_idx)]
+          string_idx += 1
+          if state.is_match
+            last_match_end = string_idx
+          elsif state.equal?(dead)
+            break
+          end
+        end
+
+        last_match_end
+      end
+    end
+
+    class LazyDFA < Base
       # Bits for detect_anchor_types: which anchor instructions exist in the
       # pattern. Used to skip unnecessary context computation.
+      ANCHOR_OPCODES = %i[bol eol bos eos eosnl wb nwb].freeze
+
       module AnchorType
         BOL           = 1 << 0 # pattern contains ^ (beginning of line)
         EOL           = 1 << 1 # pattern contains $ (end of line)
@@ -2001,7 +2041,7 @@ module Exreg
       # A DFA state is a set of NFA program counters (at consume instructions)
       # after epsilon closure, plus whether the closure reached a match state.
       class State
-        attr_reader :pc_set, :is_match
+        attr_reader :pc_set, :is_match, :transitions
 
         def initialize(pc_set, is_match)
           @pc_set = pc_set
@@ -2030,6 +2070,10 @@ module Exreg
             ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
           end
         end
+
+        def set_transitions(transitions)
+          @transitions = transitions
+        end
       end
 
       def initialize(insns, start_pc, ncaptures, named_captures, word_boundary)
@@ -2043,13 +2087,13 @@ module Exreg
       end
 
       def match_at(string, start_idx, string_len)
-        if dfa_match_at(string, start_idx, string_len)
+        if run(string, start_idx, string_len)
           @nfa.match_at(string, start_idx, string_len)
         end
       end
 
       def match_at?(string, start_idx, string_len)
-        !dfa_match_at(string, start_idx, string_len).nil?
+        !run(string, start_idx, string_len).nil?
       end
 
       private
@@ -2133,7 +2177,7 @@ module Exreg
         @states[[consume_pcs, is_match]] ||= State.new(consume_pcs, is_match)
       end
 
-      def dfa_match_at(string, start_idx, string_len)
+      def run(string, start_idx, string_len)
         state = @initial_state || closure([@start_pc], string, start_idx, string_len)
 
         return nil if state.dead? && !state.is_match
@@ -2170,11 +2214,114 @@ module Exreg
         end
 
         if !state.dead? && !state.is_match
-          eof_state = closure(state.pc_set.to_a, string, string_idx, string_len)
+          eof_state = closure(state.pc_set, string, string_idx, string_len)
           last_match_end = string_idx if eof_state.is_match
         end
 
         last_match_end
+      end
+    end
+
+    # Attempts to eagerly compile a DFA for the given instructions.
+    # Returns a DFA if successful, otherwise a LazyDFA.
+    class DFACompiler
+      # Maximum number of DFA states to eagerly compile.
+      BUDGET = 256
+
+      def initialize(insns, start_pc, ncaptures, named_captures, word_boundary)
+        @insns = insns
+        @start_pc = start_pc
+        @ncaptures = ncaptures
+        @named_captures = named_captures
+        @word_boundary = word_boundary
+        @states = {}
+        @visited = Array.new(insns.length)
+        @next_pcs = []
+      end
+
+      def compile
+        return lazy_dfa if @insns.any? { |insn| LazyDFA::ANCHOR_OPCODES.include?(insn[0]) }
+
+        initial_state = closure([@start_pc])
+        return lazy_dfa if initial_state.dead?
+
+        dead = closure([])
+        dead_transitions = Array.new(256, dead)
+        dead.set_transitions(dead_transitions)
+
+        worklist = [initial_state]
+        seen = { [initial_state.pc_set, initial_state.is_match] => true,
+                 [dead.pc_set, dead.is_match] => true }
+
+        while (state = worklist.shift)
+          transitions = state.transitions || Array.new(256)
+          256.times do |byte|
+            next if transitions[byte]
+
+            @next_pcs.clear
+            state.pc_set.each do |pc|
+              insn = @insns[pc]
+              case insn[0]
+              when :consume_exact
+                @next_pcs << insn[2] if insn[1] == byte
+              when :consume_set
+                @next_pcs << insn[2] if insn[1].has?(byte)
+              end
+            end
+
+            next_state = closure(@next_pcs)
+            next_state.set_transitions(dead_transitions) if next_state.dead?
+            transitions[byte] = next_state
+
+            id = [next_state.pc_set, next_state.is_match]
+            unless seen[id]
+              return lazy_dfa if seen.size >= BUDGET
+              seen[id] = true
+              worklist << next_state
+            end
+          end
+
+          state.set_transitions(transitions)
+        end
+
+        nfa = NFA.new(@insns, @start_pc, @ncaptures, @named_captures, @word_boundary)
+        DFA.new(initial_state, dead, nfa)
+      end
+
+      private
+
+      def lazy_dfa
+        LazyDFA.new(@insns, @start_pc, @ncaptures, @named_captures, @word_boundary)
+      end
+
+      def closure(pcs)
+        consume_pcs = []
+        stack = pcs.dup
+        visited = @visited
+        visited.fill(nil)
+        is_match = false
+
+        while (pc = stack.pop)
+          next if visited[pc]
+          visited[pc] = true
+
+          case (insn = @insns[pc])[0]
+          when :consume_exact, :consume_set
+            consume_pcs << pc
+          when :match
+            is_match = true
+          when :save
+            stack << insn[2]
+          when :split
+            stack << insn[1]
+            stack << insn[2]
+          when :jmp
+            stack << insn[1]
+          end
+        end
+
+        consume_pcs.sort!.freeze
+        @states[[consume_pcs, is_match]] ||= LazyDFA::State.new(consume_pcs, is_match)
       end
     end
   end
@@ -2237,9 +2384,11 @@ module Exreg
       named_captures = compiler.named_captures.freeze
       word_boundary = compiler.word_boundary
 
+      dfa_eligible = insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
+
       @matcher =
-        if insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
-          Matcher::DFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
+        if dfa_eligible
+          Matcher::DFACompiler.new(insns, start_pc, ncaptures, named_captures, word_boundary).compile
         else
           Matcher::NFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
         end
