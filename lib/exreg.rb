@@ -751,9 +751,23 @@ module Exreg
       end
 
       def boundary?(string, byte_idx)
+        string_len = string.bytesize
+        ws = @word_set
+
+        # Fast path: both adjacent bytes are ASCII
+        prev_byte = byte_idx > 0 ? string.getbyte(byte_idx - 1) : nil
+        next_byte = byte_idx < string_len ? string.getbyte(byte_idx) : nil
+
+        if (prev_byte.nil? || prev_byte < 0x80) && (next_byte.nil? || next_byte < 0x80)
+          prev_word = prev_byte && ws.has?(prev_byte)
+          next_word = next_byte && ws.has?(next_byte)
+          return prev_word ^ next_word
+        end
+
+        # Slow path: decode UTF-8 codepoints
         prevc = previous_codepoint(string, byte_idx)
         nextc = next_codepoint(string, byte_idx)
-        (prevc && @word_set.has?(prevc)) ^ (nextc && @word_set.has?(nextc))
+        (prevc && ws.has?(prevc)) ^ (nextc && ws.has?(nextc))
       end
 
       private
