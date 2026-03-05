@@ -634,16 +634,111 @@ module Exreg
   end
 
   # A byte order handler for little-endian encoding.
+  # Sequences split at the LSB first (first stream byte for LE) to avoid
+  # overlapping first elements in the trie.
   class ByteOrderLE
     def order(bytes)
       bytes
     end
+
+    # Yield byte-level sequences for a value range in LE stream order.
+    # Each sequence element is an Integer or Range. Sequences are split so
+    # that first elements never overlap across yields from the same call.
+    # Uses a shared buffer to avoid intermediate array allocations.
+    def byte_sequences(start_val, end_val, num_bytes, buf = Array.new(num_bytes), depth = 0, &block)
+      remaining = num_bytes - depth
+
+      if remaining == 1
+        buf[depth] = start_val..end_val
+        yield buf
+        return
+      end
+
+      max_val = (1 << (8 * remaining)) - 1
+      if start_val == 0 && end_val == max_val
+        remaining.times { |i| buf[depth + i] = 0..0xFF }
+        yield buf
+        return
+      end
+
+      b_s = start_val & 0xFF
+      b_e = end_val & 0xFF
+      upper_s = start_val >> 8
+      upper_e = end_val >> 8
+
+      if upper_s == upper_e
+        buf[depth] = b_s..b_e
+        byte_sequences(upper_s, upper_e, num_bytes, buf, depth + 1, &block)
+      elsif b_s <= b_e
+        if b_s > 0
+          buf[depth] = 0..(b_s - 1)
+          byte_sequences(upper_s + 1, upper_e, num_bytes, buf, depth + 1, &block)
+        end
+        buf[depth] = b_s..b_e
+        byte_sequences(upper_s, upper_e, num_bytes, buf, depth + 1, &block)
+        if b_e < 0xFF
+          buf[depth] = (b_e + 1)..0xFF
+          byte_sequences(upper_s, upper_e - 1, num_bytes, buf, depth + 1, &block)
+        end
+      else
+        buf[depth] = 0..b_e
+        byte_sequences(upper_s + 1, upper_e, num_bytes, buf, depth + 1, &block)
+        if b_e + 1 <= b_s - 1 && upper_e >= upper_s + 2
+          buf[depth] = (b_e + 1)..(b_s - 1)
+          byte_sequences(upper_s + 1, upper_e - 1, num_bytes, buf, depth + 1, &block)
+        end
+        buf[depth] = b_s..0xFF
+        byte_sequences(upper_s, upper_e - 1, num_bytes, buf, depth + 1, &block)
+      end
+    end
   end
 
   # A byte order handler for big-endian encoding.
+  # Sequences split at the MSB first (first stream byte for BE).
   class ByteOrderBE
     def order(bytes)
       bytes.reverse
+    end
+
+    # Yield byte-level sequences for a value range in BE stream order.
+    # Uses a shared buffer to avoid intermediate array allocations.
+    def byte_sequences(start_val, end_val, num_bytes, buf = Array.new(num_bytes), depth = 0, &block)
+      remaining = num_bytes - depth
+
+      if remaining == 1
+        buf[depth] = start_val..end_val
+        yield buf
+        return
+      end
+
+      max_val = (1 << (8 * remaining)) - 1
+      if start_val == 0 && end_val == max_val
+        remaining.times { |i| buf[depth + i] = 0..0xFF }
+        yield buf
+        return
+      end
+
+      shift = 8 * (remaining - 1)
+      mask = (1 << shift) - 1
+
+      first_s = start_val >> shift
+      first_e = end_val >> shift
+      rem_s = start_val & mask
+      rem_e = end_val & mask
+
+      if first_s == first_e
+        buf[depth] = first_s
+        byte_sequences(rem_s, rem_e, num_bytes, buf, depth + 1, &block)
+      else
+        buf[depth] = first_s
+        byte_sequences(rem_s, mask, num_bytes, buf, depth + 1, &block)
+        if first_e > first_s + 1
+          buf[depth] = (first_s + 1)..(first_e - 1)
+          byte_sequences(0, mask, num_bytes, buf, depth + 1, &block)
+        end
+        buf[depth] = first_e
+        byte_sequences(0, rem_e, num_bytes, buf, depth + 1, &block)
+      end
     end
   end
 
@@ -1038,10 +1133,16 @@ module Exreg
           originals[c.object_id] = c if c && c != :leaf && !originals.key?(c.object_id)
         end
 
-        originals.each_value do |child|
-          if node.any? { |b, c| c.equal?(child) && !entry.cover?(b) }
-            cloned = trie_dup(child)
-            entry.each { |byte| node[byte] = cloned if node[byte].equal?(child) }
+        unless originals.empty?
+          # Build reverse map once: child_id -> bytes referencing it
+          child_bytes = {}
+          node.each { |b, c| (child_bytes[c.object_id] ||= []) << b unless c == :leaf }
+
+          originals.each do |oid, child|
+            if child_bytes[oid]&.any? { |b| !entry.cover?(b) }
+              cloned = trie_dup(child)
+              entry.each { |byte| node[byte] = cloned if node[byte].equal?(child) }
+            end
           end
         end
 
@@ -1073,6 +1174,85 @@ module Exreg
       result = {}
       node.each { |k, v| result[k] = (v == :leaf ? :leaf : trie_dup(v)) }
       result
+    end
+
+    # Build a trie from all sequences at once, avoiding the sharing/cloning
+    # problem of incremental trie_insert. At each depth, bytes with identical
+    # continuing sequence sets share a single child node.
+    def build_trie_batch(sequences, depth = 0)
+      node = {}
+
+      # Separate leaf-level sequences from continuing ones
+      leaf_seqs = []
+      cont_seqs = []
+
+      sequences.each do |seq|
+        if depth == seq.length - 1
+          leaf_seqs << seq
+        else
+          cont_seqs << seq
+        end
+      end
+
+      # Mark leaf bytes
+      leaf_seqs.each do |seq|
+        entry = seq[depth]
+        r = entry.is_a?(Integer) ? entry..entry : entry
+        r.each { |byte| node[byte] = :leaf }
+      end
+
+      return node if cont_seqs.empty?
+
+      # Fast path: single continuing sequence - build chain iteratively
+      if cont_seqs.length == 1
+        seq = cont_seqs[0]
+        child = build_trie_single(seq, depth)
+        child.each { |byte, c| node[byte] = c unless node[byte] == :leaf }
+        return node
+      end
+
+      # Map each byte to the indices of continuing sequences that cover it
+      byte_indices = {}
+
+      cont_seqs.each_with_index do |seq, idx|
+        entry = seq[depth]
+        if entry.is_a?(Integer)
+          (byte_indices[entry] ||= []) << idx
+        else
+          entry.each { |byte| (byte_indices[byte] ||= []) << idx }
+        end
+      end
+
+      # Group bytes with identical index sets and share one child
+      cache = {}
+      byte_indices.each do |byte, indices|
+        next if node[byte] == :leaf
+
+        child = (cache[indices] ||= build_trie_batch(indices.map { |i| cont_seqs[i] }, depth + 1))
+        node[byte] = child
+      end
+
+      node
+    end
+
+    # Build a trie chain from a single sequence iteratively (no recursion).
+    def build_trie_single(seq, start_depth)
+      # Build from leaf backwards to start_depth
+      child = nil
+      (seq.length - 1).downto(start_depth) do |d|
+        new_node = {}
+        entry = seq[d]
+        if d == seq.length - 1
+          r = entry.is_a?(Integer) ? entry..entry : entry
+          r.each { |byte| new_node[byte] = :leaf }
+        elsif entry.is_a?(Integer)
+          new_node[entry] = child
+        else
+          entry.each { |byte| new_node[byte] = child }
+        end
+        child = new_node
+      end
+      child
     end
 
     # Compile a trie node into NFA instructions. Groups consecutive byte
@@ -1551,12 +1731,8 @@ module Exreg
 
     private
 
-    def stream_order(bytes)
-      @byte_order.order(bytes)
-    end
-
     def compile_set_encoded(unicode_set)
-      trie = {}
+      sequences = []
 
       unicode_set.each_range do |range|
         start_codepoint = range.begin
@@ -1568,48 +1744,32 @@ module Exreg
         bmp1_start = [start_codepoint, 0x0000].max
         bmp1_end = [end_codepoint, 0xD7FF].min
         if bmp1_start <= bmp1_end
-          bmp_sequences(bmp1_start, bmp1_end) { |seq| trie_insert(trie, seq, 0) }
+          @byte_order.byte_sequences(bmp1_start, bmp1_end, 2) { |seq| sequences << seq.dup }
         end
 
         # BMP after surrogates: U+E000-U+FFFF
         bmp2_start = [start_codepoint, 0xE000].max
         bmp2_end = [end_codepoint, 0xFFFF].min
         if bmp2_start <= bmp2_end
-          bmp_sequences(bmp2_start, bmp2_end) { |seq| trie_insert(trie, seq, 0) }
+          @byte_order.byte_sequences(bmp2_start, bmp2_end, 2) { |seq| sequences << seq.dup }
         end
 
         # Supplementary: U+10000-U+10FFFF
         supp_start = [start_codepoint, 0x10000].max
         supp_end = [end_codepoint, 0x10FFFF].min
         if supp_start <= supp_end
-          surrogate_sequences(supp_start, supp_end) { |seq| trie_insert(trie, seq, 0) }
+          surrogate_sequences(supp_start, supp_end) { |seq| sequences << seq.dup }
         end
       end
 
-      raise InternalError, "Empty character set" if trie.empty?
+      raise InternalError, "Empty character set" if sequences.empty?
+      trie = build_trie_batch(sequences)
       compile_trie(trie)
-    end
-
-    # Yield 2-element stream-ordered byte sequences for BMP codepoints.
-    # Splits at byte1 (MSB) boundaries.
-    def bmp_sequences(start_codepoint, end_codepoint)
-      byte1_start = (start_codepoint >> 8) & 0xFF
-      byte1_end = (end_codepoint >> 8) & 0xFF
-
-      if byte1_start == byte1_end
-        yield stream_order([(start_codepoint & 0xFF)..(end_codepoint & 0xFF), byte1_start])
-      else
-        yield stream_order([(start_codepoint & 0xFF)..0xFF, byte1_start])
-        if byte1_end > byte1_start + 1
-          yield stream_order([0..0xFF, (byte1_start + 1)..(byte1_end - 1)])
-        end
-        yield stream_order([0..(end_codepoint & 0xFF), byte1_end])
-      end
     end
 
     # Yield 4-element stream-ordered byte sequences for supplementary codepoints
     # encoded as surrogate pairs. Splits at high surrogate boundaries, then
-    # decomposes each surrogate into 2 bytes via bmp_sequences logic.
+    # decomposes each surrogate into 2 bytes via byte_sequences.
     def surrogate_sequences(start_codepoint, end_codepoint)
       start_offset = start_codepoint - 0x10000
       end_offset = end_codepoint - 0x10000
@@ -1631,26 +1791,21 @@ module Exreg
     end
 
     # Yield 4-element stream-ordered byte sequences for a surrogate pair range.
-    # Each surrogate (16-bit) is split into 2 bytes in stream order, then
-    # concatenated: [high_b0, high_b1, low_b0, low_b1].
     def surrogate_pair_sequences(high_start, high_end, low_start, low_end)
-      high_seqs = []
-      bmp_sequences(high_start, high_end) { |seq| high_seqs << seq }
-
-      low_seqs = []
-      bmp_sequences(low_start, low_end) { |seq| low_seqs << seq }
-
-      high_seqs.each do |high_seq|
-        low_seqs.each do |low_seq|
-          yield high_seq + low_seq
+      buf = Array.new(4)
+      @byte_order.byte_sequences(high_start, high_end, 2) do |high_seq|
+        buf[0] = high_seq[0]
+        buf[1] = high_seq[1]
+        @byte_order.byte_sequences(low_start, low_end, 2) do |low_seq|
+          buf[2] = low_seq[0]
+          buf[3] = low_seq[1]
+          yield buf
         end
       end
     end
   end
 
   # Base class for UTF-32 encodings (little-endian and big-endian)
-  # This class treats byte0 as LSB and byte3 as MSB for logical operations
-  # Subclasses must implement stream_order to convert to actual byte order
   class Compiler::UTF_32 < Compiler
     def initialize(byte_order)
       super()
@@ -1667,78 +1822,20 @@ module Exreg
 
     private
 
-    def stream_order(bytes)
-      @byte_order.order(bytes)
-    end
-
     def compile_set_encoded(unicode_set)
-      trie = {}
+      sequences = []
 
       unicode_set.each_range do |range|
         start_codepoint = range.begin
         end_codepoint = range.end - 1
         next if start_codepoint > end_codepoint
 
-        utf32_sequences(start_codepoint, end_codepoint) { |seq| trie_insert(trie, seq, 0) }
+        @byte_order.byte_sequences(start_codepoint, end_codepoint, 4) { |seq| sequences << seq.dup }
       end
 
-      raise InternalError, "Empty character set" if trie.empty?
+      raise InternalError, "Empty character set" if sequences.empty?
+      trie = build_trie_batch(sequences)
       compile_trie(trie)
-    end
-
-    # Yield 4-element stream-ordered byte sequences for a codepoint range.
-    # Splits at byte3 (MSB) boundaries, delegates to byte2 splitting.
-    def utf32_sequences(start_codepoint, end_codepoint)
-      byte3_start = (start_codepoint >> 24) & 0xFF
-      byte3_end = (end_codepoint >> 24) & 0xFF
-
-      if byte3_start == byte3_end
-        utf32_byte3_sequences(byte3_start, start_codepoint, end_codepoint) { |seq| yield seq }
-      else
-        codepoint_max = [end_codepoint, ((byte3_start << 24) | 0xFFFFFF)].min
-        utf32_byte3_sequences(byte3_start, start_codepoint, codepoint_max) { |seq| yield seq }
-        if byte3_end > byte3_start + 1
-          yield stream_order([0..0xFF, 0..0xFF, 0..0xFF, (byte3_start + 1)..(byte3_end - 1)])
-        end
-        codepoint_min = [start_codepoint, (byte3_end << 24)].max
-        utf32_byte3_sequences(byte3_end, codepoint_min, end_codepoint) { |seq| yield seq }
-      end
-    end
-
-    # Yield 4-element stream-ordered byte sequences within a single byte3 value.
-    # Splits at byte2 boundaries, delegates to byte1 splitting.
-    def utf32_byte3_sequences(byte3, start_codepoint, end_codepoint)
-      byte2_start = (start_codepoint >> 16) & 0xFF
-      byte2_end = (end_codepoint >> 16) & 0xFF
-
-      if byte2_start == byte2_end
-        utf32_byte2_sequences(byte2_start, byte3, start_codepoint, end_codepoint) { |seq| yield seq }
-      else
-        codepoint_max = [end_codepoint, ((byte2_start << 16) | 0xFFFF)].min
-        utf32_byte2_sequences(byte2_start, byte3, start_codepoint, codepoint_max) { |seq| yield seq }
-        if byte2_end > byte2_start + 1
-          yield stream_order([0..0xFF, 0..0xFF, (byte2_start + 1)..(byte2_end - 1), byte3])
-        end
-        codepoint_min = [start_codepoint, (byte2_end << 16)].max
-        utf32_byte2_sequences(byte2_end, byte3, codepoint_min, end_codepoint) { |seq| yield seq }
-      end
-    end
-
-    # Yield 4-element stream-ordered byte sequences within a single byte2 and
-    # byte3 value. Splits at byte1 boundaries.
-    def utf32_byte2_sequences(byte2, byte3, start_codepoint, end_codepoint)
-      byte1_start = (start_codepoint >> 8) & 0xFF
-      byte1_end = (end_codepoint >> 8) & 0xFF
-
-      if byte1_start == byte1_end
-        yield stream_order([(start_codepoint & 0xFF)..(end_codepoint & 0xFF), byte1_start, byte2, byte3])
-      else
-        yield stream_order([(start_codepoint & 0xFF)..0xFF, byte1_start, byte2, byte3])
-        if byte1_end > byte1_start + 1
-          yield stream_order([0..0xFF, (byte1_start + 1)..(byte1_end - 1), byte2, byte3])
-        end
-        yield stream_order([0..(end_codepoint & 0xFF), byte1_end, byte2, byte3])
-      end
     end
   end
 
