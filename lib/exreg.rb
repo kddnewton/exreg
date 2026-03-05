@@ -1927,6 +1927,23 @@ module Exreg
       end
     end
 
+    # A start strategy for patterns anchored at the beginning of a line
+    # (^). Yields position 0 and every position immediately after a newline.
+    class BeginningOfLine
+      def initialize
+        freeze
+      end
+
+      def each_pos(string, string_len)
+        yield 0
+        idx = 0
+        string.each_byte do |byte|
+          idx += 1
+          yield idx if byte == 0x0A
+        end
+      end
+    end
+
     # A start strategy that matches any position (e.g. from a pattern that
     # starts with a zero-width assertion or an unanchored consume).
     class Any
@@ -2586,8 +2603,10 @@ module Exreg
 
       @required_literal = compiler.required_literal
       @start =
-        if bos_anchored?(insns, start_pc)
+        if anchored_at?(insns, start_pc, :bos)
           Start::BeginningOfString.new
+        elsif anchored_at?(insns, start_pc, :bol)
+          Start::BeginningOfLine.new
         elsif !(prefix = extract_start_prefix(insns, start_pc)).empty?
           Start::Prefix.new(prefix)
         elsif (literals = compiler.alternation_prefixes)
@@ -2629,11 +2648,10 @@ module Exreg
 
     private
 
-    # Returns true if every path from start_pc passes through a :bos
-    # instruction before reaching any consume instruction. This means the
-    # pattern can only match at position 0.
-    def bos_anchored?(insns, start_pc)
-      found_bos = false
+    # Returns true if every path from start_pc passes through the given
+    # anchor instruction before reaching any consume instruction.
+    def anchored_at?(insns, start_pc, anchor)
+      found = false
       stack = [start_pc]
       visited = Set.new
 
@@ -2642,10 +2660,10 @@ module Exreg
         visited.add(pc)
 
         case insns[pc][0]
-        when :bos
-          found_bos = true
+        when anchor
+          found = true
         when :consume_exact, :consume_set
-          return false # Reached a consume without hitting :bos
+          return false
         when :match
           next
         when :split
@@ -2656,12 +2674,11 @@ module Exreg
         when :save
           stack << insns[pc][2]
         else
-          # Other zero-width assertions (:bol, :eos, :eol, etc.)
           stack << insns[pc][1]
         end
       end
 
-      found_bos
+      found
     end
 
     # common literal byte prefix that every match must start with. Returns a
