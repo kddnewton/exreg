@@ -1549,8 +1549,59 @@ module Exreg
     end
   end
 
+  # A module containing different strategies for finding the next positions to
+  # try matching from, based on the first instruction of the pattern. Used to
+  # optimize matching by skipping positions that cannot possibly match the
+  # pattern.
+  module Start
+    # A start strategy that matches a fixed byte sequence (e.g. from a literal
+    # string).
+    class Prefix
+      def initialize(prefix)
+        @prefix = prefix
+        freeze
+      end
+
+      def each_pos(string, string_len)
+        binary = string.b
+        pos = binary.index(@prefix, 0)
+        while pos
+          yield pos
+          pos = binary.index(@prefix, pos + 1)
+        end
+      end
+    end
+
+    # A start strategy that matches a single byte from a set of bytes (e.g. from
+    # a character class).
+    class ByteSet
+      def initialize(byte_set)
+        @byte_set = byte_set
+        freeze
+      end
+
+      def each_pos(string, string_len)
+        string_len.times do |idx|
+          yield idx if @byte_set.has?(string.getbyte(idx))
+        end
+      end
+    end
+
+    # A start strategy that matches any position (e.g. from a pattern that
+    # starts with a zero-width assertion or an unanchored consume).
+    class Any
+      def initialize
+        freeze
+      end
+
+      def each_pos(string, string_len)
+        (string_len + 1).times { |idx| yield idx }
+      end
+    end
+  end
+
   private_constant :USet, :UCD, :ByteSet, :Parser, :ByteOrderLE, :ByteOrderBE,
-                   :WordBoundary, :Compiler
+                   :WordBoundary, :Compiler, :Start
 
   # The result of a successful pattern match.
   class MatchData
@@ -1678,11 +1729,14 @@ module Exreg
       @nfa_visited = Array.new(@insns.length)
       @nfa_consume_visited = Array.new(@insns.length)
 
-      @literal_prefix = extract_literal_prefix
-      if @literal_prefix.empty?
-        @literal_prefix = nil
-        @first_byte_set = extract_first_byte_set
-      end
+      @start =
+        if !(prefix = extract_literal_prefix).empty?
+          Start::Prefix.new(prefix)
+        elsif (byte_set = extract_first_byte_set)
+          Start::ByteSet.new(byte_set)
+        else
+          Start::Any.new
+        end
 
       freeze
     end
@@ -1693,7 +1747,7 @@ module Exreg
       string_len = string.bytesize
 
       if @dfa_eligible
-        each_start_position(string, string_len) do |string_idx|
+        @start.each_pos(string, string_len) do |string_idx|
           if dfa_match_at(string, string_idx, string_len)
             match = match_at(string, string_idx, string_len)
             return match if match
@@ -1701,7 +1755,7 @@ module Exreg
         end
         nil
       else
-        each_start_position(string, string_len) do |string_idx|
+        @start.each_pos(string, string_len) do |string_idx|
           match = match_at(string, string_idx, string_len)
           return match if match
         end
@@ -1713,7 +1767,7 @@ module Exreg
     def match?(string)
       if @dfa_eligible
         string_len = string.bytesize
-        each_start_position(string, string_len) do |string_idx|
+        @start.each_pos(string, string_len) do |string_idx|
           return true if dfa_match_at(string, string_idx, string_len)
         end
         false
@@ -1723,24 +1777,6 @@ module Exreg
     end
 
     private
-
-    def each_start_position(string, string_len)
-      if @literal_prefix
-        binary = string.b
-        pos = binary.index(@literal_prefix, 0)
-        while pos
-          yield pos
-          pos = binary.index(@literal_prefix, pos + 1)
-        end
-      elsif @first_byte_set
-        string_len.times do |idx|
-          yield idx if @first_byte_set.has?(string.getbyte(idx))
-        end
-        yield string_len
-      else
-        (string_len + 1).times { |idx| yield idx }
-      end
-    end
 
     # Walk the NFA from @start_pc through epsilon transitions to find a
     # common literal byte prefix that every match must start with. Returns a
