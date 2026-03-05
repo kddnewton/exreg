@@ -1907,8 +1907,10 @@ module Exreg
       end
 
       def each_pos(string, string_len)
-        string_len.times do |idx|
-          yield idx if @byte_set.has?(string.getbyte(idx))
+        idx = 0
+        string.each_byte do |byte|
+          yield idx if @byte_set.has?(byte)
+          idx += 1
         end
       end
     end
@@ -1976,6 +1978,23 @@ module Exreg
         super
         @visited = Array.new(insns.length)
         @consume_visited = Array.new(insns.length)
+      end
+
+      def match(start, string)
+        string_len = string.bytesize
+        start.each_pos(string, string_len) do |string_idx|
+          result = match_at(string, string_idx, string_len)
+          return result if result
+        end
+        nil
+      end
+
+      def match?(start, string)
+        string_len = string.bytesize
+        start.each_pos(string, string_len) do |string_idx|
+          return true if match_at?(string, string_idx, string_len)
+        end
+        false
       end
 
       def match_at(string, start_idx, string_len)
@@ -2116,35 +2135,43 @@ module Exreg
         @byte_to_class = byte_to_class
       end
 
-      def match_at(string, start_idx, string_len)
-        match_end = run(string, start_idx, string_len)
-        @nfa.match_at(string, start_idx, string_len) if match_end
+      def match(start, string)
+        string_len = string.bytesize
+        return @nfa.match_at(string, 0, string_len) if @initial_state.is_match
+
+        start.each_pos(string, string_len) do |string_idx|
+          return @nfa.match_at(string, string_idx, string_len) if run?(string, string_idx, string_len)
+        end
+        nil
       end
 
-      def match_at?(string, start_idx, string_len)
-        !run(string, start_idx, string_len).nil?
+      def match?(start, string)
+        return true if @initial_state.is_match
+
+        string_len = string.bytesize
+        start.each_pos(string, string_len) do |string_idx|
+          return true if run?(string, string_idx, string_len)
+        end
+        false
       end
 
       private
 
-      def run(string, start_idx, string_len)
+      def run?(string, string_idx, string_len)
         state = @initial_state
         dead = @dead_state
-        last_match_end = state.is_match ? start_idx : nil
+        btc = @byte_to_class
 
-        string_idx = start_idx
         while string_idx < string_len
-          state = state.transitions[@byte_to_class[string.getbyte(string_idx)]]
+          state = state.transitions[btc[string.getbyte(string_idx)]]
           string_idx += 1
-          if state.is_match
-            last_match_end = string_idx
-          elsif state.equal?(dead)
-            break
-          end
+          return true if state.is_match
+          return false if state.equal?(dead)
         end
 
-        last_match_end
+        false
       end
+
     end
 
     class LazyDFA < Base
@@ -2223,14 +2250,22 @@ module Exreg
         @nfa = NFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
       end
 
-      def match_at(string, start_idx, string_len)
-        if run(string, start_idx, string_len)
-          @nfa.match_at(string, start_idx, string_len)
+      def match(start, string)
+        string_len = string.bytesize
+        start.each_pos(string, string_len) do |string_idx|
+          if run(string, string_idx, string_len)
+            return @nfa.match_at(string, string_idx, string_len)
+          end
         end
+        nil
       end
 
-      def match_at?(string, start_idx, string_len)
-        !run(string, start_idx, string_len).nil?
+      def match?(start, string)
+        string_len = string.bytesize
+        start.each_pos(string, string_len) do |string_idx|
+          return true if run(string, string_idx, string_len)
+        end
+        false
       end
 
       private
@@ -2556,22 +2591,13 @@ module Exreg
     # found, a MatchData instance is returned; otherwise, nil is returned.
     def match(string)
       return nil if @required_literal && !string.b.include?(@required_literal)
-      string_len = string.bytesize
-      @start.each_pos(string, string_len) do |string_idx|
-        match = @matcher.match_at(string, string_idx, string_len)
-        return match if match
-      end
-      nil
+      @matcher.match(@start, string)
     end
 
     # True if the pattern matches the given string.
     def match?(string)
       return false if @required_literal && !string.b.include?(@required_literal)
-      string_len = string.bytesize
-      @start.each_pos(string, string_len) do |string_idx|
-        return true if @matcher.match_at?(string, string_idx, string_len)
-      end
-      false
+      @matcher.match?(@start, string)
     end
 
     if RUBY_VERSION >= "4.0.0"
