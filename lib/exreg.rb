@@ -1792,68 +1792,395 @@ module Exreg
     end
   end
 
-  # Bitmask constants for the lazy DFA.
-  module DFA
-    # Bits for detect_anchor_types: which anchor instructions exist in the
-    # pattern. Used to skip unnecessary context computation.
-    module AnchorType
-      BOL           = 1 << 0 # pattern contains ^ (beginning of line)
-      EOL           = 1 << 1 # pattern contains $ (end of line)
-      BOS           = 1 << 2 # pattern contains \A (beginning of string)
-      EOS           = 1 << 3 # pattern contains \z (end of string)
-      EOSNL         = 1 << 4 # pattern contains \Z (end of string or before final \n)
-      WORD_BOUNDARY = 1 << 5 # pattern contains \b or \B
-    end
-
-    # Bits for compute_context: which positional conditions hold at a given
-    # byte index. Included in the DFA cache key so transitions that depend
-    # on anchors are correctly distinguished.
-    module Context
-      AT_START       = 1 << 0 # string_idx == 0
-      PREV_NEWLINE   = 1 << 1 # previous byte was \n
-      AT_END         = 1 << 2 # string_idx == string_len
-      CURR_NEWLINE   = 1 << 3 # current byte is \n
-      PENULTIMATE    = 1 << 4 # string_idx + 1 == string_len
-      WORD_BOUNDARY  = 1 << 5 # at a word boundary
-    end
-
-    # A DFA state is a set of NFA program counters (at consume instructions)
-    # after epsilon closure, plus whether the closure reached a match state.
-    class State
-      attr_reader :pc_set, :is_match
-
-      def initialize(pc_set, is_match)
-        @pc_set = pc_set
-        @is_match = is_match
-        @hash = pc_set.hash
-        @transitions = nil
-        @ctx_transitions = nil
+  # Matcher classes that handle NFA and DFA matching. Extracted from Pattern
+  # to separate matching concerns from pattern compilation and start strategy.
+  module Matcher
+    class Base
+      def initialize(insns, start_pc, ncaptures, named_captures, word_boundary)
+        @insns = insns
+        @start_pc = start_pc
+        @ncaptures = ncaptures
+        @named_captures = named_captures
+        @word_boundary = word_boundary
       end
 
-      def hash = @hash
-      def eql?(other) = @pc_set == other.pc_set
-      def dead? = @pc_set.empty?
+      private
 
-      def next_state(context, byte)
-        if context == 0
-          @transitions&.[](byte)
+      def next_pcs(insn, string, string_idx, string_len)
+        case insn[0]
+        when :split
+          yield insn[1]
+          yield insn[2]
+        when :jmp
+          yield insn[1]
+        when :atomic_enter, :atomic_leave
+          yield insn[1]
+        when :save
+          yield insn[2]
+        when :bol
+          yield insn[1] if (string_idx == 0) || (string_idx > 0 && string.getbyte(string_idx - 1) == "\n".ord)
+        when :bos
+          yield insn[1] if string_idx == 0
+        when :eol
+          yield insn[1] if (string_idx == string_len) || (string_idx < string_len && string.getbyte(string_idx) == "\n".ord)
+        when :eos
+          yield insn[1] if string_idx == string_len
+        when :eosnl
+          yield insn[1] if (string_idx == string_len) || (string_idx + 1 == string_len && string.getbyte(string_idx) == "\n".ord)
+        when :wb
+          yield insn[1] if @word_boundary.boundary?(string, string_idx)
+        when :nwb
+          yield insn[1] unless @word_boundary.boundary?(string, string_idx)
         else
-          @ctx_transitions&.[](context)&.[](byte)
+          raise InternalError, "Unexpected instruction: #{insn[0].inspect}"
+        end
+      end
+    end
+
+    class NFA < Base
+      def initialize(insns, start_pc, ncaptures, named_captures, word_boundary)
+        super
+        @visited = Array.new(insns.length)
+        @consume_visited = Array.new(insns.length)
+      end
+
+      def match_at(string, start_idx, string_len)
+        last_match = nil
+        state, match_data = closure([[@start_pc, [start_idx, *Array.new(@ncaptures * 2 - 1)]]], start_idx, string_len, string)
+
+        if match_data
+          last_match = match_data
+          return match_data if state.empty?
+        end
+
+        string_idx = start_idx
+        while string_idx < string_len
+          byte = string.getbyte(string_idx)
+          next_entries = []
+
+          state.each do |pc, captures|
+            case (insn = @insns[pc])[0]
+            when :consume_exact
+              next_entries << [insn[2], captures] if insn[1] == byte
+            when :consume_set
+              next_entries << [insn[2], captures] if insn[1].has?(byte)
+            end
+          end
+
+          break if next_entries.empty?
+          state, match_data = closure(next_entries, string_idx + 1, string_len, string)
+
+          if match_data
+            last_match = match_data
+            return match_data if state.empty?
+          end
+
+          string_idx += 1
+        end
+
+        last_match
+      end
+
+      def match_at?(string, start_idx, string_len)
+        !match_at(string, start_idx, string_len).nil?
+      end
+
+      private
+
+      def closure(entries, string_idx, string_len, string)
+        state = []
+        stack = entries.dup
+        visited = @visited
+        visited.fill(nil)
+        last_match = nil
+
+        while (entry = stack.pop)
+          pc, captures = entry
+          next if visited[pc]
+          visited[pc] = true
+
+          case (insn = @insns[pc])[0]
+          when :consume_exact, :consume_set
+            state << [pc, captures]
+          when :match
+            last_match =
+              MatchData.new(
+                string,
+                captures.each_slice(2).map do |start_pos, end_pos|
+                  (start_pos...end_pos) if start_pos && end_pos
+                end,
+                @named_captures
+              )
+          when :save
+            updated = captures.dup
+            updated[insn[1]] = string_idx
+            stack << [insn[2], updated]
+          when :split
+            case insn[3]
+            when :lazy
+              stack << [insn[1], captures]
+              stack << [insn[2], captures]
+            when :possessive
+              if consume?(insn[1], string, string_idx, string_len)
+                stack << [insn[1], captures]
+              else
+                stack << [insn[2], captures]
+              end
+            when :greedy
+              stack << [insn[2], captures]
+              stack << [insn[1], captures]
+            else
+              raise InternalError, "Unknown split mode: #{insn[3].inspect}"
+            end
+          when :atomic_enter
+            stack.clear
+            visited.fill(nil)
+            stack << [insn[1], captures]
+          when :atomic_leave
+            stack.clear
+            visited.fill(nil)
+            stack << [insn[1], captures]
+          else
+            next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << [next_pc, captures] }
+          end
+        end
+
+        [state, last_match]
+      end
+
+      def consume?(pc, string, string_idx, string_len)
+        return false if string_idx >= string_len
+
+        byte = string.getbyte(string_idx)
+        visited = @consume_visited
+        visited.fill(nil)
+        stack = [pc]
+
+        while (current = stack.pop)
+          next if visited[current]
+          visited[current] = true
+
+          case (insn = @insns[current])[0]
+          when :consume_exact
+            return true if insn[1] == byte
+          when :consume_set
+            return true if insn[1].has?(byte)
+          else
+            next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << next_pc }
+          end
+        end
+
+        false
+      end
+    end
+
+    class DFA < Base
+      # Bits for detect_anchor_types: which anchor instructions exist in the
+      # pattern. Used to skip unnecessary context computation.
+      module AnchorType
+        BOL           = 1 << 0 # pattern contains ^ (beginning of line)
+        EOL           = 1 << 1 # pattern contains $ (end of line)
+        BOS           = 1 << 2 # pattern contains \A (beginning of string)
+        EOS           = 1 << 3 # pattern contains \z (end of string)
+        EOSNL         = 1 << 4 # pattern contains \Z (end of string or before final \n)
+        WORD_BOUNDARY = 1 << 5 # pattern contains \b or \B
+      end
+
+      # Bits for compute_context: which positional conditions hold at a given
+      # byte index. Included in the DFA cache key so transitions that depend
+      # on anchors are correctly distinguished.
+      module Context
+        AT_START       = 1 << 0 # string_idx == 0
+        PREV_NEWLINE   = 1 << 1 # previous byte was \n
+        AT_END         = 1 << 2 # string_idx == string_len
+        CURR_NEWLINE   = 1 << 3 # current byte is \n
+        PENULTIMATE    = 1 << 4 # string_idx + 1 == string_len
+        WORD_BOUNDARY  = 1 << 5 # at a word boundary
+      end
+
+      # A DFA state is a set of NFA program counters (at consume instructions)
+      # after epsilon closure, plus whether the closure reached a match state.
+      class State
+        attr_reader :pc_set, :is_match
+
+        def initialize(pc_set, is_match)
+          @pc_set = pc_set
+          @is_match = is_match
+          @hash = pc_set.hash
+          @transitions = nil
+          @ctx_transitions = nil
+        end
+
+        def hash = @hash
+        def eql?(other) = @pc_set == other.pc_set
+        def dead? = @pc_set.empty?
+
+        def next_state(context, byte)
+          if context == 0
+            @transitions&.[](byte)
+          else
+            @ctx_transitions&.[](context)&.[](byte)
+          end
+        end
+
+        def set_next_state(context, byte, state)
+          if context == 0
+            (@transitions ||= Array.new(256))[byte] = state
+          else
+            ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
+          end
         end
       end
 
-      def set_next_state(context, byte, state)
-        if context == 0
-          (@transitions ||= Array.new(256))[byte] = state
-        else
-          ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
+      def initialize(insns, start_pc, ncaptures, named_captures, word_boundary)
+        super
+        @anchor_types = find_anchor_types
+        @states = {}
+        @visited = Array.new(insns.length)
+        @next_pcs = []
+        @initial_state = @anchor_types == 0 ? closure([@start_pc], "".b, 0, 0) : nil
+        @nfa = NFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
+      end
+
+      def match_at(string, start_idx, string_len)
+        if dfa_match_at(string, start_idx, string_len)
+          @nfa.match_at(string, start_idx, string_len)
         end
+      end
+
+      def match_at?(string, start_idx, string_len)
+        !dfa_match_at(string, start_idx, string_len).nil?
+      end
+
+      private
+
+      def find_anchor_types
+        types = 0
+        @insns.each do |insn|
+          case insn[0]
+          when :bol then types |= AnchorType::BOL
+          when :eol then types |= AnchorType::EOL
+          when :bos then types |= AnchorType::BOS
+          when :eos then types |= AnchorType::EOS
+          when :eosnl then types |= AnchorType::EOSNL
+          when :wb, :nwb then types |= AnchorType::WORD_BOUNDARY
+          end
+        end
+        types
+      end
+
+      def compute_context(string, string_idx, string_len)
+        return 0 if @anchor_types == 0
+
+        ctx = 0
+
+        if @anchor_types & (AnchorType::BOL | AnchorType::BOS) != 0
+          ctx |= Context::AT_START if string_idx == 0
+        end
+
+        if @anchor_types & AnchorType::BOL != 0
+          ctx |= Context::PREV_NEWLINE if string_idx > 0 && string.getbyte(string_idx - 1) == 0x0A
+        end
+
+        if @anchor_types & (AnchorType::EOL | AnchorType::EOS | AnchorType::EOSNL) != 0
+          ctx |= Context::AT_END if string_idx == string_len
+        end
+
+        if @anchor_types & (AnchorType::EOL | AnchorType::EOSNL) != 0
+          ctx |= Context::CURR_NEWLINE if string_idx < string_len && string.getbyte(string_idx) == 0x0A
+        end
+
+        if @anchor_types & AnchorType::EOSNL != 0
+          ctx |= Context::PENULTIMATE if string_idx + 1 == string_len
+        end
+
+        if @anchor_types & AnchorType::WORD_BOUNDARY != 0
+          ctx |= Context::WORD_BOUNDARY if @word_boundary.boundary?(string, string_idx)
+        end
+
+        ctx
+      end
+
+      def closure(pcs, string, string_idx, string_len)
+        consume_pcs = []
+        stack = pcs.dup
+        visited = @visited
+        visited.fill(nil)
+        is_match = false
+
+        while (pc = stack.pop)
+          next if visited[pc]
+          visited[pc] = true
+
+          case (insn = @insns[pc])[0]
+          when :consume_exact, :consume_set
+            consume_pcs << pc
+          when :match
+            is_match = true
+          when :save
+            stack << insn[2]
+          when :split
+            stack << insn[1]
+            stack << insn[2]
+          when :jmp
+            stack << insn[1]
+          else
+            next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << next_pc }
+          end
+        end
+
+        consume_pcs.sort!.freeze
+        @states[[consume_pcs, is_match]] ||= State.new(consume_pcs, is_match)
+      end
+
+      def dfa_match_at(string, start_idx, string_len)
+        state = @initial_state || closure([@start_pc], string, start_idx, string_len)
+
+        return nil if state.dead? && !state.is_match
+
+        last_match_end = state.is_match ? start_idx : nil
+
+        string_idx = start_idx
+        while string_idx < string_len
+          byte = string.getbyte(string_idx)
+          next_ctx = @anchor_types == 0 ? 0 : compute_context(string, string_idx + 1, string_len)
+
+          next_state = state.next_state(next_ctx, byte)
+
+          unless next_state
+            @next_pcs.clear
+            state.pc_set.each do |pc|
+              insn = @insns[pc]
+              case insn[0]
+              when :consume_exact
+                @next_pcs << insn[2] if insn[1] == byte
+              when :consume_set
+                @next_pcs << insn[2] if insn[1].has?(byte)
+              end
+            end
+
+            next_state = closure(@next_pcs, string, string_idx + 1, string_len)
+            state.set_next_state(next_ctx, byte, next_state)
+          end
+
+          state = next_state
+          string_idx += 1
+          last_match_end = string_idx if state.is_match
+          break if state.dead?
+        end
+
+        if !state.dead? && !state.is_match
+          eof_state = closure(state.pc_set.to_a, string, string_idx, string_len)
+          last_match_end = string_idx if eof_state.is_match
+        end
+
+        last_match_end
       end
     end
   end
 
   private_constant :USet, :UCD, :ByteSet, :Parser, :ByteOrderLE, :ByteOrderBE,
-                   :WordBoundary, :Compiler, :Start, :DFA
+                   :WordBoundary, :Compiler, :Start, :Matcher
 
   # The result of a successful pattern match.
   class MatchData
@@ -1899,36 +2226,31 @@ module Exreg
     attr_reader :source
 
     def initialize(source, options = Option::NONE, encoding = Encoding::UTF_8)
+      @source = source
+
       compiler = Compiler.for(encoding)
       compiler.compile(source, options)
 
-      @source = source
-      @insns = compiler.insns.freeze
-      @start_pc = compiler.start_pc
-      @ncaptures = compiler.ncaptures
-      @named_captures = compiler.named_captures.freeze
-      @word_boundary = compiler.word_boundary
+      insns = compiler.insns.freeze
+      start_pc = compiler.start_pc
+      ncaptures = compiler.ncaptures
+      named_captures = compiler.named_captures.freeze
+      word_boundary = compiler.word_boundary
+
+      @matcher =
+        if insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
+          Matcher::DFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
+        else
+          Matcher::NFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
+        end
+
       @required_literal = compiler.required_literal
-
-      @dfa_eligible = @insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
-
-      if @dfa_eligible
-        @anchor_types = detect_anchor_types
-        @dfa_states = {}
-        @dfa_visited = Array.new(@insns.length)
-        @dfa_next_pcs = []
-        @dfa_initial_state = @anchor_types == 0 ? dfa_closure([@start_pc], "".b, 0, 0) : nil
-      end
-
-      @nfa_visited = Array.new(@insns.length)
-      @nfa_consume_visited = Array.new(@insns.length)
-
       @start =
-        if !(prefix = extract_literal_prefix).empty?
+        if !(prefix = extract_start_prefix(insns, start_pc)).empty?
           Start::Prefix.new(prefix)
         elsif (literals = compiler.alternation_prefixes)
           Start::Literals.new(literals)
-        elsif (byte_set = extract_first_byte_set)
+        elsif (byte_set = extract_start_byte_set(insns, start_pc))
           Start::ByteSet.new(byte_set)
         else
           Start::Any.new
@@ -1942,52 +2264,36 @@ module Exreg
     def match(string)
       return nil if @required_literal && !string.b.include?(@required_literal)
       string_len = string.bytesize
-
-      if @dfa_eligible
-        @start.each_pos(string, string_len) do |string_idx|
-          if dfa_match_at(string, string_idx, string_len)
-            match = match_at(string, string_idx, string_len)
-            return match if match
-          end
-        end
-        nil
-      else
-        @start.each_pos(string, string_len) do |string_idx|
-          match = match_at(string, string_idx, string_len)
-          return match if match
-        end
-        nil
+      @start.each_pos(string, string_len) do |string_idx|
+        match = @matcher.match_at(string, string_idx, string_len)
+        return match if match
       end
+      nil
     end
 
     # True if the pattern matches the given string.
     def match?(string)
       return false if @required_literal && !string.b.include?(@required_literal)
-      if @dfa_eligible
-        string_len = string.bytesize
-        @start.each_pos(string, string_len) do |string_idx|
-          return true if dfa_match_at(string, string_idx, string_len)
-        end
-        false
-      else
-        !match(string).nil?
+      string_len = string.bytesize
+      @start.each_pos(string, string_len) do |string_idx|
+        return true if @matcher.match_at?(string, string_idx, string_len)
       end
+      false
     end
 
     private
 
-    # Walk the NFA from @start_pc through epsilon transitions to find a
+    # Walk the NFA from start_pc through epsilon transitions to find a
     # common literal byte prefix that every match must start with. Returns a
     # frozen binary string (possibly empty).
-    def extract_literal_prefix
+    def extract_start_prefix(insns, start_pc)
       prefix = []
-      pc = @start_pc
+      pc = start_pc
       seen_pcs = Set.new
 
       loop do
         break if seen_pcs.include?(pc)
         seen_pcs.add(pc)
-        # Walk epsilon closure from pc, collecting all reachable consume instructions.
         stack = [pc]
         visited = Set.new
         consume_insns = []
@@ -1996,11 +2302,10 @@ module Exreg
           next if visited.include?(current)
           visited.add(current)
 
-          case (insn = @insns[current])[0]
+          case (insn = insns[current])[0]
           when :consume_exact, :consume_set
             consume_insns << insn
           when :match
-            # A match is reachable — the prefix could be empty, stop here.
             return prefix.pack("C*").freeze
           when :split
             stack << insn[1]
@@ -2010,15 +2315,12 @@ module Exreg
           when :save
             stack << insn[2]
           else
-            # Anchors — treat as epsilon
             stack << insn[1]
           end
         end
 
         break if consume_insns.empty?
 
-        # Check if all consume instructions agree on the same single byte
-        # and the same next PC.
         byte = nil
         next_pc = nil
         all_same = true
@@ -2051,11 +2353,11 @@ module Exreg
       prefix.pack("C*").freeze
     end
 
-    # Walk the NFA from @start_pc through epsilon transitions and union all
+    # Walk the NFA from start_pc through epsilon transitions and union all
     # bytes from reachable consume instructions into a ByteSet. Returns nil if
     # a zero-length match is possible or all 256 bytes are present.
-    def extract_first_byte_set
-      stack = [@start_pc]
+    def extract_start_byte_set(insns, start_pc)
+      stack = [start_pc]
       visited = Set.new
       result = ByteSet.new
 
@@ -2063,7 +2365,7 @@ module Exreg
         next if visited.include?(current)
         visited.add(current)
 
-        case (insn = @insns[current])[0]
+        case (insn = insns[current])[0]
         when :consume_exact
           byte = insn[1]
           return nil if byte > 255
@@ -2071,7 +2373,6 @@ module Exreg
         when :consume_set
           result = result | insn[1]
         when :match
-          # Zero-length match possible — all positions are candidates.
           return nil
         when :split
           stack << insn[1]
@@ -2081,316 +2382,13 @@ module Exreg
         when :save
           stack << insn[2]
         else
-          # Anchors — treat as epsilon
           stack << insn[1]
         end
       end
 
-      # If all 256 bits are set, the set is useless.
       return nil if result == ByteSet[0..255]
 
       result
-    end
-
-    def match_at(string, start_idx, string_len)
-      last_match = nil
-      state, match_data = closure([[@start_pc, [start_idx, *Array.new(@ncaptures * 2 - 1)]]], start_idx, string_len, string)
-
-      if match_data
-        last_match = match_data
-        return match_data if state.empty?
-      end
-
-      string_idx = start_idx
-      while string_idx < string_len
-        byte = string.getbyte(string_idx)
-        next_entries = []
-
-        state.each do |pc, captures|
-          case (insn = @insns[pc])[0]
-          when :consume_exact
-            next_entries << [insn[2], captures] if insn[1] == byte
-          when :consume_set
-            next_entries << [insn[2], captures] if insn[1].has?(byte)
-          end
-        end
-
-        break if next_entries.empty?
-        state, match_data = closure(next_entries, string_idx + 1, string_len, string)
-
-        if match_data
-          last_match = match_data
-          return match_data if state.empty?
-        end
-
-        string_idx += 1
-      end
-
-      last_match
-    end
-
-    def closure(entries, string_idx, string_len, string)
-      state = []
-      stack = entries.dup
-      visited = @nfa_visited
-      visited.fill(nil)
-      last_match = nil
-
-      while (entry = stack.pop)
-        pc, captures = entry
-        next if visited[pc]
-        visited[pc] = true
-
-        case (insn = @insns[pc])[0]
-        when :consume_exact, :consume_set
-          state << [pc, captures]
-        when :match
-          last_match =
-            MatchData.new(
-              string,
-              captures.each_slice(2).map do |start_pos, end_pos|
-                (start_pos...end_pos) if start_pos && end_pos
-              end,
-              @named_captures
-            )
-        when :save
-          updated = captures.dup
-          updated[insn[1]] = string_idx
-          stack << [insn[2], updated]
-        when :split
-          case insn[3]
-          when :lazy
-            stack << [insn[1], captures]
-            stack << [insn[2], captures]
-          when :possessive
-            if consume?(insn[1], string, string_idx, string_len)
-              stack << [insn[1], captures]
-            else
-              stack << [insn[2], captures]
-            end
-          when :greedy
-            stack << [insn[2], captures]
-            stack << [insn[1], captures]
-          else
-            raise InternalError, "Unknown split mode: #{insn[3].inspect}"
-          end
-        when :atomic_enter
-          stack.clear
-          visited.fill(nil)
-          stack << [insn[1], captures]
-        when :atomic_leave
-          stack.clear
-          visited.fill(nil)
-          stack << [insn[1], captures]
-        else
-          next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << [next_pc, captures] }
-        end
-      end
-
-      [state, last_match]
-    end
-
-    def consume?(pc, string, string_idx, string_len)
-      return false if string_idx >= string_len
-
-      byte = string.getbyte(string_idx)
-      visited = @nfa_consume_visited
-      visited.fill(nil)
-      stack = [pc]
-
-      while (current = stack.pop)
-        next if visited[current]
-        visited[current] = true
-
-        case (insn = @insns[current])[0]
-        when :consume_exact
-          return true if insn[1] == byte
-        when :consume_set
-          return true if insn[1].has?(byte)
-        else
-          next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << next_pc }
-        end
-      end
-
-      false
-    end
-
-    def next_pcs(insn, string, string_idx, string_len)
-      case insn[0]
-      when :split
-        yield insn[1]
-        yield insn[2]
-      when :jmp
-        yield insn[1]
-      when :atomic_enter, :atomic_leave
-        yield insn[1]
-      when :save
-        yield insn[2]
-      when :bol
-        yield insn[1] if (string_idx == 0) || (string_idx > 0 && string.getbyte(string_idx - 1) == "\n".ord)
-      when :bos
-        yield insn[1] if string_idx == 0
-      when :eol
-        yield insn[1] if (string_idx == string_len) || (string_idx < string_len && string.getbyte(string_idx) == "\n".ord)
-      when :eos
-        yield insn[1] if string_idx == string_len
-      when :eosnl
-        yield insn[1] if (string_idx == string_len) || (string_idx + 1 == string_len && string.getbyte(string_idx) == "\n".ord)
-      when :wb
-        yield insn[1] if @word_boundary.boundary?(string, string_idx)
-      when :nwb
-        yield insn[1] unless @word_boundary.boundary?(string, string_idx)
-      else
-        raise InternalError, "Unexpected instruction: #{insn[0].inspect}"
-      end
-    end
-
-    # Detect which anchor instruction types exist in the pattern. Returns a
-    # bitmask so compute_context can skip unnecessary work.
-    def detect_anchor_types
-      types = 0
-      @insns.each do |insn|
-        case insn[0]
-        when :bol then types |= DFA::AnchorType::BOL
-        when :eol then types |= DFA::AnchorType::EOL
-        when :bos then types |= DFA::AnchorType::BOS
-        when :eos then types |= DFA::AnchorType::EOS
-        when :eosnl then types |= DFA::AnchorType::EOSNL
-        when :wb, :nwb then types |= DFA::AnchorType::WORD_BOUNDARY
-        end
-      end
-      types
-    end
-
-    # Compute position-dependent context flags for DFA epsilon closure. Only
-    # computes flags for anchor types actually used by the pattern.
-    def compute_context(string, string_idx, string_len)
-      return 0 if @anchor_types == 0
-
-      ctx = 0
-
-      if @anchor_types & (DFA::AnchorType::BOL | DFA::AnchorType::BOS) != 0
-        ctx |= DFA::Context::AT_START if string_idx == 0
-      end
-
-      if @anchor_types & DFA::AnchorType::BOL != 0
-        ctx |= DFA::Context::PREV_NEWLINE if string_idx > 0 && string.getbyte(string_idx - 1) == 0x0A
-      end
-
-      if @anchor_types & (DFA::AnchorType::EOL | DFA::AnchorType::EOS | DFA::AnchorType::EOSNL) != 0
-        ctx |= DFA::Context::AT_END if string_idx == string_len
-      end
-
-      if @anchor_types & (DFA::AnchorType::EOL | DFA::AnchorType::EOSNL) != 0
-        ctx |= DFA::Context::CURR_NEWLINE if string_idx < string_len && string.getbyte(string_idx) == 0x0A
-      end
-
-      if @anchor_types & DFA::AnchorType::EOSNL != 0
-        ctx |= DFA::Context::PENULTIMATE if string_idx + 1 == string_len
-      end
-
-      if @anchor_types & DFA::AnchorType::WORD_BOUNDARY != 0
-        ctx |= DFA::Context::WORD_BOUNDARY if @word_boundary.boundary?(string, string_idx)
-      end
-
-      ctx
-    end
-
-    # Capture-free epsilon closure for DFA. Returns a DFA::State representing
-    # the set of NFA PCs at consume instructions reachable from the given PCs.
-    def dfa_closure(pcs, string, string_idx, string_len)
-      consume_pcs = []
-      stack = pcs.dup
-      visited = @dfa_visited
-      visited.fill(nil)
-      is_match = false
-
-      while (pc = stack.pop)
-        next if visited[pc]
-        visited[pc] = true
-
-        case (insn = @insns[pc])[0]
-        when :consume_exact, :consume_set
-          consume_pcs << pc
-        when :match
-          is_match = true
-        when :save
-          stack << insn[2]
-        when :split
-          stack << insn[1]
-          stack << insn[2]
-        when :jmp
-          stack << insn[1]
-        else
-          next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << next_pc }
-        end
-      end
-
-      consume_pcs.sort!.freeze
-      intern_dfa_state(consume_pcs, is_match)
-    end
-
-    # Intern DFA states so equal (pc_set, is_match) pairs share the same
-    # object. The same pc_set can have different is_match values depending
-    # on which epsilon transitions were followed to reach the consume states.
-    def intern_dfa_state(sorted_pcs, is_match)
-      key = [sorted_pcs, is_match]
-      if (existing = @dfa_states[key])
-        existing
-      else
-        state = DFA::State.new(sorted_pcs, is_match)
-        @dfa_states[key] = state
-        state
-      end
-    end
-
-    # DFA matching loop. Returns the end position of the match (Integer) or
-    # nil if no match exists starting at start_idx.
-    def dfa_match_at(string, start_idx, string_len)
-      state = @dfa_initial_state || dfa_closure([@start_pc], string, start_idx, string_len)
-
-      return nil if state.dead? && !state.is_match
-
-      last_match_end = state.is_match ? start_idx : nil
-
-      string_idx = start_idx
-      while string_idx < string_len
-        byte = string.getbyte(string_idx)
-        next_ctx = @anchor_types == 0 ? 0 : compute_context(string, string_idx + 1, string_len)
-
-        # Cache key uses next position's context since the epsilon closure
-        # that produces next_state runs at string_idx + 1.
-        next_state = state.next_state(next_ctx, byte)
-
-        unless next_state
-          @dfa_next_pcs.clear
-          state.pc_set.each do |pc|
-            insn = @insns[pc]
-            case insn[0]
-            when :consume_exact
-              @dfa_next_pcs << insn[2] if insn[1] == byte
-            when :consume_set
-              @dfa_next_pcs << insn[2] if insn[1].has?(byte)
-            end
-          end
-
-          next_state = dfa_closure(@dfa_next_pcs, string, string_idx + 1, string_len)
-          state.set_next_state(next_ctx, byte, next_state)
-        end
-
-        state = next_state
-        string_idx += 1
-        last_match_end = string_idx if state.is_match
-        break if state.dead?
-      end
-
-      # Check for match at EOF (for anchors like $, \z, \Z)
-      if !state.dead? && !state.is_match
-        eof_state = dfa_closure(state.pc_set.to_a, string, string_idx, string_len)
-        last_match_end = string_idx if eof_state.is_match
-      end
-
-      last_match_end
     end
   end
 end
