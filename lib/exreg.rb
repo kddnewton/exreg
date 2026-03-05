@@ -1610,44 +1610,28 @@ module Exreg
       @pc_set = pc_set
       @is_match = is_match
       @hash = pc_set.hash
-      freeze
+      @transitions = nil
+      @ctx_transitions = nil
     end
 
     def hash = @hash
     def eql?(other) = @pc_set == other.pc_set
     def dead? = @pc_set.empty?
-  end
 
-  # A cache for DFA transitions. Organized as a two-level hash:
-  # state -> context -> 256-element array mapping byte to next DFAState.
-  class DFACache
-    def initialize(max_size = 512)
-      @max_size = max_size
-      @entries = 0
-      @cache = {}
-    end
-
-    def lookup(state, context, byte)
-      ctx_hash = @cache[state]
-      return unless ctx_hash
-      transitions = ctx_hash[context]
-      transitions[byte] if transitions
-    end
-
-    def store(state, context, byte, next_state)
-      ctx_hash = @cache[state] ||= {}
-      transitions = ctx_hash[context]
-      unless transitions
-        if @entries >= @max_size
-          @cache.clear
-          @entries = 0
-          ctx_hash = @cache[state] = {}
-        end
-        transitions = Array.new(256)
-        ctx_hash[context] = transitions
-        @entries += 1
+    def next_state(context, byte)
+      if context == 0
+        @transitions&.[](byte)
+      else
+        @ctx_transitions&.[](context)&.[](byte)
       end
-      transitions[byte] = next_state
+    end
+
+    def set_next_state(context, byte, state)
+      if context == 0
+        (@transitions ||= Array.new(256))[byte] = state
+      else
+        ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
+      end
     end
   end
 
@@ -1686,7 +1670,6 @@ module Exreg
 
       if @dfa_eligible
         @anchor_types = detect_anchor_types
-        @dfa_cache = DFACache.new
         @dfa_states = {}
         @dfa_visited = Array.new(@insns.length)
         @dfa_initial_state = @anchor_types == 0 ? dfa_closure([@start_pc], "".b, 0, 0) : nil
@@ -2143,7 +2126,7 @@ module Exreg
 
         # Cache key uses next position's context since the epsilon closure
         # that produces next_state runs at string_idx + 1.
-        next_state = @dfa_cache.lookup(state, next_ctx, byte)
+        next_state = state.next_state(next_ctx, byte)
 
         unless next_state
           raw_next_pcs = []
@@ -2158,7 +2141,7 @@ module Exreg
           end
 
           next_state = dfa_closure(raw_next_pcs, string, string_idx + 1, string_len)
-          @dfa_cache.store(state, next_ctx, byte, next_state)
+          state.set_next_state(next_ctx, byte, next_state)
         end
 
         state = next_state
