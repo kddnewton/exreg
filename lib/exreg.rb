@@ -1600,32 +1600,6 @@ module Exreg
     end
   end
 
-  private_constant :USet, :UCD, :ByteSet, :Parser, :ByteOrderLE, :ByteOrderBE,
-                   :WordBoundary, :Compiler, :Start
-
-  # The result of a successful pattern match.
-  class MatchData
-    def initialize(string, ranges, named_captures = {})
-      @string = string
-      @ranges = ranges
-      @named_captures = named_captures
-    end
-
-    def [](key)
-      case key
-      when Integer
-        range = @ranges[key]
-        @string.byteslice(range) if range
-      when String
-        index = @named_captures[key]
-        range = @ranges[index] if index
-        @string.byteslice(range) if range
-      else
-        raise TypeError, "Invalid key type: #{key.inspect}"
-      end
-    end
-  end
-
   # Bitmask constants for the lazy DFA.
   module DFA
     # Bits for detect_anchor_types: which anchor instructions exist in the
@@ -1650,38 +1624,64 @@ module Exreg
       PENULTIMATE    = 1 << 4 # string_idx + 1 == string_len
       WORD_BOUNDARY  = 1 << 5 # at a word boundary
     end
-  end
 
-  # A DFA state is a set of NFA program counters (at consume instructions)
-  # after epsilon closure, plus whether the closure reached a match state.
-  class DFAState
-    attr_reader :pc_set, :is_match
+    # A DFA state is a set of NFA program counters (at consume instructions)
+    # after epsilon closure, plus whether the closure reached a match state.
+    class State
+      attr_reader :pc_set, :is_match
 
-    def initialize(pc_set, is_match)
-      @pc_set = pc_set
-      @is_match = is_match
-      @hash = pc_set.hash
-      @transitions = nil
-      @ctx_transitions = nil
-    end
+      def initialize(pc_set, is_match)
+        @pc_set = pc_set
+        @is_match = is_match
+        @hash = pc_set.hash
+        @transitions = nil
+        @ctx_transitions = nil
+      end
 
-    def hash = @hash
-    def eql?(other) = @pc_set == other.pc_set
-    def dead? = @pc_set.empty?
+      def hash = @hash
+      def eql?(other) = @pc_set == other.pc_set
+      def dead? = @pc_set.empty?
 
-    def next_state(context, byte)
-      if context == 0
-        @transitions&.[](byte)
-      else
-        @ctx_transitions&.[](context)&.[](byte)
+      def next_state(context, byte)
+        if context == 0
+          @transitions&.[](byte)
+        else
+          @ctx_transitions&.[](context)&.[](byte)
+        end
+      end
+
+      def set_next_state(context, byte, state)
+        if context == 0
+          (@transitions ||= Array.new(256))[byte] = state
+        else
+          ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
+        end
       end
     end
+  end
 
-    def set_next_state(context, byte, state)
-      if context == 0
-        (@transitions ||= Array.new(256))[byte] = state
+  private_constant :USet, :UCD, :ByteSet, :Parser, :ByteOrderLE, :ByteOrderBE,
+                   :WordBoundary, :Compiler, :Start, :DFA
+
+  # The result of a successful pattern match.
+  class MatchData
+    def initialize(string, ranges, named_captures = {})
+      @string = string
+      @ranges = ranges
+      @named_captures = named_captures
+    end
+
+    def [](key)
+      case key
+      when Integer
+        range = @ranges[key]
+        @string.byteslice(range) if range
+      when String
+        index = @named_captures[key]
+        range = @ranges[index] if index
+        @string.byteslice(range) if range
       else
-        ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
+        raise TypeError, "Invalid key type: #{key.inspect}"
       end
     end
   end
@@ -2098,7 +2098,7 @@ module Exreg
       ctx
     end
 
-    # Capture-free epsilon closure for DFA. Returns a DFAState representing
+    # Capture-free epsilon closure for DFA. Returns a DFA::State representing
     # the set of NFA PCs at consume instructions reachable from the given PCs.
     def dfa_closure(pcs, string, string_idx, string_len)
       consume_pcs = []
@@ -2140,7 +2140,7 @@ module Exreg
       if (existing = @dfa_states[key])
         existing
       else
-        state = DFAState.new(sorted_pcs, is_match)
+        state = DFA::State.new(sorted_pcs, is_match)
         @dfa_states[key] = state
         state
       end
