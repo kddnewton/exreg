@@ -287,8 +287,7 @@ module Exreg
 
     # True if the given byte is included in the set.
     def has?(byte)
-      raise InternalError, "Byte out of range: #{byte}" unless (0..255).cover?(byte)
-      @bitmaps[byte / 32].anybits?(1 << (byte % 32))
+      @bitmaps[byte >> 5].anybits?(1 << (byte & 31))
     end
 
     # True if no bytes are included in the set.
@@ -1619,28 +1618,36 @@ module Exreg
     def dead? = @pc_set.empty?
   end
 
-  # An LRU cache for DFA transitions. Keys are [DFAState, context_flags]
-  # pairs, values are 256-element arrays mapping byte values to next DFAState.
+  # A cache for DFA transitions. Organized as a two-level hash:
+  # state -> context -> 256-element array mapping byte to next DFAState.
   class DFACache
     def initialize(max_size = 512)
       @max_size = max_size
+      @entries = 0
       @cache = {}
     end
 
     def lookup(state, context, byte)
-      key = [state, context]
-      if (transitions = @cache.delete(key))
-        @cache[key] = transitions
-        transitions[byte]
-      end
+      ctx_hash = @cache[state]
+      return unless ctx_hash
+      transitions = ctx_hash[context]
+      transitions[byte] if transitions
     end
 
     def store(state, context, byte, next_state)
-      key = [state, context]
-      transitions = @cache.delete(key) || Array.new(256)
+      ctx_hash = @cache[state] ||= {}
+      transitions = ctx_hash[context]
+      unless transitions
+        if @entries >= @max_size
+          @cache.clear
+          @entries = 0
+          ctx_hash = @cache[state] = {}
+        end
+        transitions = Array.new(256)
+        ctx_hash[context] = transitions
+        @entries += 1
+      end
       transitions[byte] = next_state
-      @cache[key] = transitions
-      @cache.delete(@cache.first[0]) if @cache.size > @max_size
     end
   end
 
@@ -1681,7 +1688,12 @@ module Exreg
         @anchor_types = detect_anchor_types
         @dfa_cache = DFACache.new
         @dfa_states = {}
+        @dfa_visited = Array.new(@insns.length)
+        @dfa_initial_state = @anchor_types == 0 ? dfa_closure([@start_pc], "".b, 0, 0) : nil
       end
+
+      @nfa_visited = Array.new(@insns.length)
+      @nfa_consume_visited = Array.new(@insns.length)
 
       @literal_prefix = extract_literal_prefix
       if @literal_prefix.empty?
@@ -1903,13 +1915,14 @@ module Exreg
     def closure(entries, string_idx, string_len, string)
       state = []
       stack = entries.dup
-      visited = Set.new
+      visited = @nfa_visited
+      visited.fill(nil)
       last_match = nil
 
       while (entry = stack.pop)
         pc, captures = entry
-        next if visited.include?(pc)
-        visited.add(pc)
+        next if visited[pc]
+        visited[pc] = true
 
         case (insn = @insns[pc])[0]
         when :consume_exact, :consume_set
@@ -1946,11 +1959,11 @@ module Exreg
           end
         when :atomic_enter
           stack.clear
-          visited.clear
+          visited.fill(nil)
           stack << [insn[1], captures]
         when :atomic_leave
           stack.clear
-          visited.clear
+          visited.fill(nil)
           stack << [insn[1], captures]
         else
           next_pcs(insn, string, string_idx, string_len) { |next_pc| stack << [next_pc, captures] }
@@ -1964,12 +1977,13 @@ module Exreg
       return false if string_idx >= string_len
 
       byte = string.getbyte(string_idx)
-      visited = Set.new
+      visited = @nfa_consume_visited
+      visited.fill(nil)
       stack = [pc]
 
       while (current = stack.pop)
-        next if visited.include?(current)
-        visited.add(current)
+        next if visited[current]
+        visited[current] = true
 
         case (insn = @insns[current])[0]
         when :consume_exact
@@ -2070,12 +2084,13 @@ module Exreg
     def dfa_closure(pcs, string, string_idx, string_len)
       consume_pcs = []
       stack = pcs.dup
-      visited = Set.new
+      visited = @dfa_visited
+      visited.fill(nil)
       is_match = false
 
       while (pc = stack.pop)
-        next if visited.include?(pc)
-        visited.add(pc)
+        next if visited[pc]
+        visited[pc] = true
 
         case (insn = @insns[pc])[0]
         when :consume_exact, :consume_set
@@ -2115,7 +2130,7 @@ module Exreg
     # DFA matching loop. Returns the end position of the match (Integer) or
     # nil if no match exists starting at start_idx.
     def dfa_match_at(string, start_idx, string_len)
-      state = dfa_closure([@start_pc], string, start_idx, string_len)
+      state = @dfa_initial_state || dfa_closure([@start_pc], string, start_idx, string_len)
 
       return nil if state.dead? && !state.is_match
 
