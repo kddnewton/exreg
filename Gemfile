@@ -3,6 +3,7 @@
 source "https://rubygems.org"
 
 gem "bundler"
+gem "irb"
 gem "minitest"
 gem "rake"
 gem "rubyzip"

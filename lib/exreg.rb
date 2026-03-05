@@ -324,6 +324,20 @@ module Exreg
       ByteSet.new(@bitmaps.map { |bitmap| ~bitmap & 0xFFFFFFFF })
     end
 
+    # Iterate over each byte value in the set.
+    def each
+      return enum_for(:each) unless block_given?
+      @bitmaps.each_with_index do |bitmap, idx|
+        base = idx * 32
+        b = bitmap
+        while b != 0
+          bit = b & -b
+          yield base + bit.bit_length - 1
+          b &= b - 1
+        end
+      end
+    end
+
     # Two ByteSets are equal if they have the same bitmaps.
     def ==(other)
       other.is_a?(ByteSet) && @bitmaps == other.bitmaps
@@ -333,6 +347,74 @@ module Exreg
     # Hash based on the bitmaps to allow deduplication.
     def hash
       @bitmaps.hash
+    end
+  end
+
+  # Partitions bytes 0..255 into equivalence classes such that bytes behaving
+  # identically across all consume instructions share a class. This reduces
+  # DFA transition tables from 256 entries to num_classes entries.
+  class ByteEquivalenceClasses
+    attr_reader :byte_to_class, :num_classes, :representatives
+
+    def initialize(insns)
+      byte_to_class = Array.new(256, 0)
+      class_sizes = [256]
+      num_classes = 1
+      seen_sets = {}
+
+      insns.each do |insn|
+        case insn[0]
+        when :consume_exact
+          byte = insn[1]
+          next unless byte < 256
+          old_cls = byte_to_class[byte]
+          if class_sizes[old_cls] > 1
+            byte_to_class[byte] = num_classes
+            class_sizes[old_cls] -= 1
+            class_sizes << 1
+            num_classes += 1
+          end
+        when :consume_set
+          set = insn[1]
+          next if seen_sets[set]
+          seen_sets[set] = true
+
+          # Count how many bytes of each class are in the set, iterating
+          # only the set bits rather than all 256 bytes.
+          class_in_count = Hash.new(0)
+          set.each { |b| class_in_count[byte_to_class[b]] += 1 }
+
+          # A class is split when it has members both in and out of the set.
+          remap = {}
+          class_in_count.each do |cls, in_count|
+            if in_count < class_sizes[cls]
+              remap[cls] = num_classes
+              class_sizes[cls] -= in_count
+              class_sizes << in_count
+              num_classes += 1
+            end
+          end
+
+          # Remap bytes in the set that belong to split classes, again
+          # iterating only the set bits.
+          unless remap.empty?
+            set.each do |b|
+              new_cls = remap[byte_to_class[b]]
+              byte_to_class[b] = new_cls if new_cls
+            end
+          end
+        end
+      end
+
+      @byte_to_class = byte_to_class.freeze
+      @num_classes = num_classes
+      @representatives = Array.new(num_classes)
+      256.times do |b|
+        cls = byte_to_class[b]
+        @representatives[cls] ||= b
+      end
+      @representatives.freeze
+      freeze
     end
   end
 
@@ -1975,10 +2057,11 @@ module Exreg
     end
 
     class DFA
-      def initialize(initial_state, dead_state, nfa)
+      def initialize(initial_state, dead_state, nfa, byte_to_class)
         @initial_state = initial_state
         @dead_state = dead_state
         @nfa = nfa
+        @byte_to_class = byte_to_class
       end
 
       def match_at(string, start_idx, string_len)
@@ -1999,7 +2082,7 @@ module Exreg
 
         string_idx = start_idx
         while string_idx < string_len
-          state = state.transitions[string.getbyte(string_idx)]
+          state = state.transitions[@byte_to_class[string.getbyte(string_idx)]]
           string_idx += 1
           if state.is_match
             last_match_end = string_idx
@@ -2055,19 +2138,19 @@ module Exreg
         def eql?(other) = @pc_set == other.pc_set
         def dead? = @pc_set.empty?
 
-        def next_state(context, byte)
+        def next_state(context, cls)
           if context == 0
-            @transitions&.[](byte)
+            @transitions&.[](cls)
           else
-            @ctx_transitions&.[](context)&.[](byte)
+            @ctx_transitions&.[](context)&.[](cls)
           end
         end
 
-        def set_next_state(context, byte, state)
+        def set_next_state(context, cls, state, num_classes)
           if context == 0
-            (@transitions ||= Array.new(256))[byte] = state
+            (@transitions ||= Array.new(num_classes))[cls] = state
           else
-            ((@ctx_transitions ||= {})[context] ||= Array.new(256))[byte] = state
+            ((@ctx_transitions ||= {})[context] ||= Array.new(num_classes))[cls] = state
           end
         end
 
@@ -2076,9 +2159,11 @@ module Exreg
         end
       end
 
-      def initialize(insns, start_pc, ncaptures, named_captures, word_boundary)
-        super
+      def initialize(insns, start_pc, ncaptures, named_captures, word_boundary, equiv_classes)
+        super(insns, start_pc, ncaptures, named_captures, word_boundary)
         @anchor_types = find_anchor_types
+        @byte_to_class = equiv_classes.byte_to_class
+        @num_classes = equiv_classes.num_classes
         @states = {}
         @visited = Array.new(insns.length)
         @next_pcs = []
@@ -2187,9 +2272,10 @@ module Exreg
         string_idx = start_idx
         while string_idx < string_len
           byte = string.getbyte(string_idx)
+          cls = @byte_to_class[byte]
           next_ctx = @anchor_types == 0 ? 0 : compute_context(string, string_idx + 1, string_len)
 
-          next_state = state.next_state(next_ctx, byte)
+          next_state = state.next_state(next_ctx, cls)
 
           unless next_state
             @next_pcs.clear
@@ -2204,7 +2290,7 @@ module Exreg
             end
 
             next_state = closure(@next_pcs, string, string_idx + 1, string_len)
-            state.set_next_state(next_ctx, byte, next_state)
+            state.set_next_state(next_ctx, cls, next_state, @num_classes)
           end
 
           state = next_state
@@ -2234,6 +2320,7 @@ module Exreg
         @ncaptures = ncaptures
         @named_captures = named_captures
         @word_boundary = word_boundary
+        @equiv_classes = ByteEquivalenceClasses.new(insns)
         @states = {}
         @visited = Array.new(insns.length)
         @next_pcs = []
@@ -2245,8 +2332,11 @@ module Exreg
         initial_state = closure([@start_pc])
         return lazy_dfa if initial_state.dead?
 
+        num_classes = @equiv_classes.num_classes
+        representatives = @equiv_classes.representatives
+
         dead = closure([])
-        dead_transitions = Array.new(256, dead)
+        dead_transitions = Array.new(num_classes, dead)
         dead.set_transitions(dead_transitions)
 
         worklist = [initial_state]
@@ -2254,10 +2344,11 @@ module Exreg
                  [dead.pc_set, dead.is_match] => true }
 
         while (state = worklist.shift)
-          transitions = state.transitions || Array.new(256)
-          256.times do |byte|
-            next if transitions[byte]
+          transitions = state.transitions || Array.new(num_classes)
+          num_classes.times do |cls|
+            next if transitions[cls]
 
+            byte = representatives[cls]
             @next_pcs.clear
             state.pc_set.each do |pc|
               insn = @insns[pc]
@@ -2271,7 +2362,7 @@ module Exreg
 
             next_state = closure(@next_pcs)
             next_state.set_transitions(dead_transitions) if next_state.dead?
-            transitions[byte] = next_state
+            transitions[cls] = next_state
 
             id = [next_state.pc_set, next_state.is_match]
             unless seen[id]
@@ -2285,13 +2376,13 @@ module Exreg
         end
 
         nfa = NFA.new(@insns, @start_pc, @ncaptures, @named_captures, @word_boundary)
-        DFA.new(initial_state, dead, nfa)
+        DFA.new(initial_state, dead, nfa, @equiv_classes.byte_to_class)
       end
 
       private
 
       def lazy_dfa
-        LazyDFA.new(@insns, @start_pc, @ncaptures, @named_captures, @word_boundary)
+        LazyDFA.new(@insns, @start_pc, @ncaptures, @named_captures, @word_boundary, @equiv_classes)
       end
 
       def closure(pcs)
@@ -2326,8 +2417,9 @@ module Exreg
     end
   end
 
-  private_constant :USet, :UCD, :ByteSet, :Parser, :ByteOrderLE, :ByteOrderBE,
-                   :WordBoundary, :Compiler, :Start, :Matcher
+  private_constant :USet, :UCD, :ByteSet, :ByteEquivalenceClasses, :Parser,
+                   :ByteOrderLE, :ByteOrderBE, :WordBoundary, :Compiler,
+                   :Start, :Matcher
 
   # The result of a successful pattern match.
   class MatchData
@@ -2370,10 +2462,12 @@ module Exreg
   # analogous to a Regexp instance, and has loosely the same API.
   class Pattern
     # The source string used to create the pattern.
-    attr_reader :source
+    attr_reader :source, :options
 
     def initialize(source, options = Option::NONE, encoding = Encoding::UTF_8)
       @source = source
+      @options = options
+      @encoding = encoding
 
       compiler = Compiler.for(encoding)
       compiler.compile(source, options)
@@ -2384,10 +2478,8 @@ module Exreg
       named_captures = compiler.named_captures.freeze
       word_boundary = compiler.word_boundary
 
-      dfa_eligible = insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
-
       @matcher =
-        if dfa_eligible
+        if insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
           Matcher::DFACompiler.new(insns, start_pc, ncaptures, named_captures, word_boundary).compile
         else
           Matcher::NFA.new(insns, start_pc, ncaptures, named_captures, word_boundary)
@@ -2428,6 +2520,19 @@ module Exreg
         return true if @matcher.match_at?(string, string_idx, string_len)
       end
       false
+    end
+
+    if RUBY_VERSION >= "4.0.0"
+      def instance_variables_to_inspect
+        [:@encoding, :@options, :@source]
+      end
+    else
+      def inspect
+        "#<#{self.class}:0x#{object_id.to_s(16)} " \
+          "@encoding=#{@encoding.inspect}, " \
+          "@options=#{@options.inspect}, " \
+          "@source=#{@source.inspect}>"
+      end
     end
 
     private
