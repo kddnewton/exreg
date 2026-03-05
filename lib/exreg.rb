@@ -710,7 +710,8 @@ module Exreg
       end
     end
 
-    attr_reader :insns, :start_pc, :ncaptures, :named_captures
+    attr_reader :insns, :start_pc, :ncaptures, :named_captures,
+                :alternation_prefixes, :required_literal
 
     def initialize
       @bytesets = ByteSetSet.new
@@ -718,10 +719,15 @@ module Exreg
       @start_pc = 0
       @ncaptures = 1
       @named_captures = {}
+      @alternation_prefixes = nil
+      @required_literal = nil
     end
 
     def compile(source, options)
-      frag = compile_node(Parser.new(source).parse, options)
+      ast = Parser.new(source).parse
+      @alternation_prefixes = extract_alternation_prefixes(ast)
+      @required_literal = extract_required_literal(ast)
+      frag = compile_node(ast, options)
 
       enter = emit_insn([:save, 0, -1])
       patch_insns([[enter, 2]], frag[0])
@@ -738,7 +744,129 @@ module Exreg
       raise InternalError, "Implemented in subclass"
     end
 
+    def encode_codepoint(codepoint)
+      raise InternalError, "Implemented in subclass"
+    end
+
     private
+
+    def encode_codepoints(codepoints)
+      bytes = []
+      codepoints.each { |codepoint| bytes.concat(encode_codepoint(codepoint)) }
+      bytes.pack("C*").freeze
+    end
+
+    # Extract literal byte-string prefixes from a top-level alternation AST
+    # node. For a pattern like "cat|dog|bird", returns ["cat", "dog", "bird"]
+    # as frozen binary strings. These are used by Start::Literals to quickly
+    # scan for candidate match positions using String#index. Returns nil if
+    # the root node is not an :alt, or if any branch lacks a literal prefix.
+    def extract_alternation_prefixes(node)
+      return nil unless node[0] == :alt
+
+      branches = []
+      flatten_alt(node, branches)
+
+      prefixes = branches.map do |branch|
+        codepoints = extract_node_literal_prefix(branch)
+        return nil if codepoints.empty?
+        encode_codepoints(codepoints)
+      end
+
+      prefixes
+    end
+
+    def flatten_alt(node, branches)
+      if node[0] == :alt
+        flatten_alt(node[1], branches)
+        flatten_alt(node[2], branches)
+      else
+        branches << node
+      end
+    end
+
+    def extract_node_literal_prefix(node)
+      case node[0]
+      when :seq
+        codepoints = []
+        node[1].each do |child|
+          break unless child[0] == :exact
+          codepoints << child[1]
+        end
+        codepoints
+      when :exact
+        [node[1]]
+      when :capture
+        extract_node_literal_prefix(node[2])
+      when :nocapture
+        extract_node_literal_prefix(node[1])
+      else
+        []
+      end
+    end
+
+    # Walk the AST to find the longest contiguous run of :exact nodes on a
+    # path that every match must traverse (sequences, required quantifiers,
+    # captures). The result is used as a fast rejection filter in match/match?
+    # — if the haystack doesn't contain this literal, the pattern cannot
+    # match. Returns a frozen binary string of at least 2 bytes, or nil.
+    def extract_required_literal(node)
+      codepoints = extract_required_literal_codepoints(node)
+      return nil if codepoints.nil? || codepoints.length < 2
+      encode_codepoints(codepoints)
+    end
+
+    def extract_required_literal_codepoints(node)
+      case node[0]
+      when :seq
+        best = nil
+        current_run = []
+        node[1].each do |child|
+          if child[0] == :exact
+            current_run << child[1]
+          else
+            if current_run.length > (best&.length || 0)
+              best = current_run.dup
+            end
+            current_run.clear
+            # Check required children recursively
+            candidate = extract_required_literal_from_child(child)
+            if candidate && candidate.length > (best&.length || 0)
+              best = candidate
+            end
+          end
+        end
+        if current_run.length > (best&.length || 0)
+          best = current_run.dup
+        end
+        best
+      when :exact
+        [node[1]]
+      when :capture
+        extract_required_literal_codepoints(node[2])
+      when :nocapture
+        extract_required_literal_codepoints(node[1])
+      when :quant
+        _, child, min, = node
+        min >= 1 ? extract_required_literal_codepoints(child) : nil
+      else
+        nil
+      end
+    end
+
+    def extract_required_literal_from_child(node)
+      case node[0]
+      when :capture
+        extract_required_literal_codepoints(node[2])
+      when :nocapture
+        extract_required_literal_codepoints(node[1])
+      when :quant
+        _, child, min, = node
+        min >= 1 ? extract_required_literal_codepoints(child) : nil
+      else
+        nil
+      end
+    end
 
     def emit_insn(insn)
       @insns << insn
@@ -1060,6 +1188,18 @@ module Exreg
       WordBoundary::UTF_8.new(word_set)
     end
 
+    def encode_codepoint(codepoint)
+      if codepoint <= 0x7F
+        [codepoint]
+      elsif codepoint <= 0x7FF
+        [0xC0 | (codepoint >> 6), 0x80 | (codepoint & 0x3F)]
+      elsif codepoint <= 0xFFFF
+        [0xE0 | (codepoint >> 12), 0x80 | ((codepoint >> 6) & 0x3F), 0x80 | (codepoint & 0x3F)]
+      else
+        [0xF0 | (codepoint >> 18), 0x80 | ((codepoint >> 12) & 0x3F), 0x80 | ((codepoint >> 6) & 0x3F), 0x80 | (codepoint & 0x3F)]
+      end
+    end
+
     private
 
     def compile_set_encoded(unicode_set)
@@ -1255,6 +1395,18 @@ module Exreg
       WordBoundary::UTF_16.new(@byte_order, word_set)
     end
 
+    def encode_codepoint(codepoint)
+      if codepoint <= 0xFFFF
+        @byte_order.order([codepoint & 0xFF, (codepoint >> 8) & 0xFF])
+      else
+        offset = codepoint - 0x10000
+        high = 0xD800 + (offset >> 10)
+        low = 0xDC00 + (offset & 0x3FF)
+        @byte_order.order([high & 0xFF, (high >> 8) & 0xFF]) +
+          @byte_order.order([low & 0xFF, (low >> 8) & 0xFF])
+      end
+    end
+
     private
 
     def stream_order(bytes)
@@ -1403,6 +1555,10 @@ module Exreg
 
     def word_boundary
       WordBoundary::UTF_32.new(@byte_order, word_set)
+    end
+
+    def encode_codepoint(codepoint)
+      @byte_order.order([codepoint & 0xFF, (codepoint >> 8) & 0xFF, (codepoint >> 16) & 0xFF, (codepoint >> 24) & 0xFF])
     end
 
     private
@@ -1572,6 +1728,42 @@ module Exreg
       end
     end
 
+    # A start strategy that matches any of a set of literal byte strings
+    # (e.g. from alternation prefixes like cat|dog|bird).
+    class Literals
+      def initialize(literals)
+        @literals = literals
+        freeze
+      end
+
+      def each_pos(string, string_len)
+        binary = string.b
+        positions = @literals.map { |lit| binary.index(lit, 0) }
+        last_yielded = -1
+
+        loop do
+          min_pos = nil
+          min_idx = nil
+          positions.each_with_index do |pos, idx|
+            next unless pos
+            if min_pos.nil? || pos < min_pos
+              min_pos = pos
+              min_idx = idx
+            end
+          end
+
+          break unless min_pos
+
+          if min_pos > last_yielded
+            yield min_pos
+            last_yielded = min_pos
+          end
+
+          positions[min_idx] = binary.index(@literals[min_idx], min_pos + 1)
+        end
+      end
+    end
+
     # A start strategy that matches a single byte from a set of bytes (e.g. from
     # a character class).
     class ByteSet
@@ -1716,6 +1908,7 @@ module Exreg
       @ncaptures = compiler.ncaptures
       @named_captures = compiler.named_captures.freeze
       @word_boundary = compiler.word_boundary
+      @required_literal = compiler.required_literal
 
       @dfa_eligible = @insns.none? { |insn| insn[0] == :atomic_enter || insn[0] == :atomic_leave }
 
@@ -1733,6 +1926,8 @@ module Exreg
       @start =
         if !(prefix = extract_literal_prefix).empty?
           Start::Prefix.new(prefix)
+        elsif (literals = compiler.alternation_prefixes)
+          Start::Literals.new(literals)
         elsif (byte_set = extract_first_byte_set)
           Start::ByteSet.new(byte_set)
         else
@@ -1745,6 +1940,7 @@ module Exreg
     # Attempt to match the pattern against the given string. If a match is
     # found, a MatchData instance is returned; otherwise, nil is returned.
     def match(string)
+      return nil if @required_literal && !string.b.include?(@required_literal)
       string_len = string.bytesize
 
       if @dfa_eligible
@@ -1766,6 +1962,7 @@ module Exreg
 
     # True if the pattern matches the given string.
     def match?(string)
+      return false if @required_literal && !string.b.include?(@required_literal)
       if @dfa_eligible
         string_len = string.bytesize
         @start.each_pos(string, string_len) do |string_idx|
