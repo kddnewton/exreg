@@ -1016,6 +1016,111 @@ module Exreg
       frag
     end
 
+    # Insert a byte sequence into the trie. Each trie node is a Hash mapping
+    # byte values (Integer) to child nodes. Leaf entries map to :leaf.
+    def trie_insert(node, seq, depth)
+      entry = seq[depth]
+
+      if depth == seq.length - 1
+        # Last element in sequence - these are always ranges (or
+        # convertible to ranges) representing the final byte set.
+        r = entry.is_a?(Integer) ? entry..entry : entry
+        r.each { |byte| node[byte] = :leaf }
+      elsif entry.is_a?(Integer)
+        child = (node[entry] ||= {})
+        trie_insert(child, seq, depth + 1) if child != :leaf
+      else
+        # When inserting a range, children shared with bytes outside our
+        # range must be cloned so modifications don't leak.
+        originals = {}
+        entry.each do |byte|
+          c = node[byte]
+          originals[c.object_id] = c if c && c != :leaf && !originals.key?(c.object_id)
+        end
+
+        originals.each_value do |child|
+          if node.any? { |b, c| c.equal?(child) && !entry.cover?(b) }
+            cloned = trie_dup(child)
+            entry.each { |byte| node[byte] = cloned if node[byte].equal?(child) }
+          end
+        end
+
+        # For bytes without an entry, share one child hash so that
+        # compile_trie can group them into a single consume_set.
+        shared = nil
+        recursed = {}
+        entry.each do |byte|
+          existing = node[byte]
+          if existing == :leaf
+            next
+          elsif existing
+            unless recursed[existing.object_id]
+              recursed[existing.object_id] = true
+              trie_insert(existing, seq, depth + 1)
+            end
+          else
+            shared ||= {}
+            node[byte] = shared
+          end
+        end
+        trie_insert(shared, seq, depth + 1) if shared
+      end
+    end
+
+    # Deep-copy a trie node so that modifications to the copy don't affect
+    # the original.
+    def trie_dup(node)
+      result = {}
+      node.each { |k, v| result[k] = (v == :leaf ? :leaf : trie_dup(v)) }
+      result
+    end
+
+    # Compile a trie node into NFA instructions. Groups consecutive byte
+    # keys that share the same child node, emitting consume_set for ranges
+    # and consume_exact for single bytes.
+    def compile_trie(node)
+      # Group consecutive bytes that point to the same child (by object_id
+      # for Hash children, or :leaf for leaves).
+      groups = []
+      sorted_bytes = node.keys.sort
+
+      sorted_bytes.each do |byte|
+        child = node[byte]
+        child_id = child.object_id
+
+        if groups.last && groups.last[2] == child_id && groups.last[1] == byte - 1
+          groups.last[1] = byte
+        else
+          groups << [byte, byte, child_id, child]
+        end
+      end
+
+      alts = groups.map do |first, last, _, child|
+        if child == :leaf
+          # Terminal: emit a consume instruction
+          if first == last
+            compile_consume_exact(first)
+          else
+            compile_consume_set(@bytesets.add(first..last))
+          end
+        else
+          # Non-terminal: emit consume then recurse
+          head =
+            if first == last
+              compile_consume_exact(first)
+            else
+              compile_consume_set(@bytesets.add(first..last))
+            end
+
+          tail = compile_trie(child)
+          patch_insns(head[1], tail[0])
+          [head[0], tail[1]]
+        end
+      end
+
+      compile_alts(alts)
+    end
+
     def compile_atomic(frag)
       enter = emit_insn([:atomic_enter, -1])
       leave = emit_insn([:atomic_leave, -1])
@@ -1224,8 +1329,8 @@ module Exreg
 
     def posix_class_set(name)
       case name
-      when "alnum"  then UCD["letter"] | UCD["mark"] | UCD["decimalnumber"]
-      when "alpha"  then UCD["letter"] | UCD["mark"]
+      when "alnum"  then UCD["letter"] | UCD["mark"] | UCD["decimalnumber"] | UCD["letternumber"]
+      when "alpha"  then UCD["letter"] | UCD["mark"] | UCD["letternumber"]
       when "ascii"  then USet[0x0000..0x007F]
       when "blank"  then UCD["spaceseparator"] | USet[0x0009]
       when "cntrl"  then UCD["control"] | UCD["format"] | UCD["unassigned"] | UCD["privateuse"] | UCD["surrogate"]
@@ -1236,7 +1341,7 @@ module Exreg
       when "punct"  then UCD["punctuation"] | USet[0x24, 0x2B, 0x3C, 0x3D, 0x3E, 0x5E, 0x60, 0x7C, 0x7E]
       when "space"  then UCD["spaceseparator"] | UCD["lineseparator"] | UCD["paragraphseparator"] | USet[0x09, 0x0A..0x0D, 0x85]
       when "upper"  then UCD["uppercaseletter"]
-      when "word"   then UCD["letter"] | UCD["mark"] | UCD["decimalnumber"] | UCD["connectorpunctuation"]
+      when "word"   then UCD["letter"] | UCD["mark"] | UCD["decimalnumber"] | UCD["connectorpunctuation"] | UCD["letternumber"]
       when "xdigit" then USet[0x0030..0x0039, 0x0041..0x0046, 0x0061..0x0066]
       else
         raise SyntaxError, "Unsupported POSIX class [:#{name}:]"
@@ -1285,183 +1390,138 @@ module Exreg
     private
 
     def compile_set_encoded(unicode_set)
-      frags = []
+      # Build a byte-level trie from all codepoint ranges, then compile it
+      # into NFA instructions. This shares common UTF-8 prefixes instead of
+      # generating duplicate instruction chains for each codepoint range.
+      trie = {}
 
       unicode_set.each_range do |range|
         start_codepoint = range.begin
         end_codepoint = range.end - 1
         next if start_codepoint > end_codepoint
 
-        alts = []
-
-        if start_codepoint <= 0x7F
-          alts << compile_consume_set(@bytesets.add(start_codepoint..[end_codepoint, 0x7F].min))
-        end
-
-        if end_codepoint >= 0x80
-          if start_codepoint <= 0x7FF
-            alts << compile_range_2([start_codepoint, 0x80].max, [end_codepoint, 0x7FF].min)
-          end
-
-          if end_codepoint >= 0x800
-            alts << compile_range_3([start_codepoint, 0x800].max, [end_codepoint, 0xFFFF].min)
-          end
-
-          if end_codepoint >= 0x10000
-            alts << compile_range_4([start_codepoint, 0x10000].max, [end_codepoint, 0x10FFFF].min)
-          end
-        end
-
-        frags << compile_alts(alts)
+        # Decompose each codepoint range into byte-level sequences and
+        # insert them into the trie.
+        utf8_sequences(start_codepoint, end_codepoint) { |seq| trie_insert(trie, seq, 0) }
       end
 
-      raise InternalError, "Empty character set" if frags.empty?
-      compile_alts(frags)
+      raise InternalError, "Empty character set" if trie.empty?
+      compile_trie(trie)
     end
 
-    def compile_range_2(start_codepoint, end_codepoint)
+    # Yield byte-level sequences for a codepoint range. Each sequence is an
+    # array where each element is either an Integer (exact byte) or a Range
+    # (byte range). For example, U+0080..U+00BF yields [[0xC2, 0x80..0xBF]].
+    def utf8_sequences(start_codepoint, end_codepoint)
+      if start_codepoint <= 0x7F
+        yield [start_codepoint..[end_codepoint, 0x7F].min]
+      end
+
+      if end_codepoint >= 0x80 && start_codepoint <= 0x7FF
+        range_2_sequences([start_codepoint, 0x80].max, [end_codepoint, 0x7FF].min) { |s| yield s }
+      end
+
+      if end_codepoint >= 0x800 && start_codepoint <= 0xFFFF
+        range_3_sequences([start_codepoint, 0x800].max, [end_codepoint, 0xFFFF].min) { |s| yield s }
+      end
+
+      if end_codepoint >= 0x10000
+        range_4_sequences([start_codepoint, 0x10000].max, [end_codepoint, 0x10FFFF].min) { |s| yield s }
+      end
+    end
+
+    def range_2_sequences(start_codepoint, end_codepoint)
       lead_start = 0xC0 | (start_codepoint >> 6)
       lead_end = 0xC0 | (end_codepoint >> 6)
 
       if lead_start == lead_end
-        cont_start = 0x80 | (start_codepoint & 0x3F)
-        cont_end = 0x80 | (end_codepoint & 0x3F)
-        compile_seq([lead_start, cont_start..cont_end])
+        yield [lead_start, (0x80 | (start_codepoint & 0x3F))..(0x80 | (end_codepoint & 0x3F))]
       else
-        alts = []
-
-        cont_start = 0x80 | (start_codepoint & 0x3F)
-        alts << compile_seq([lead_start, cont_start..0xBF])
-
+        yield [lead_start, (0x80 | (start_codepoint & 0x3F))..0xBF]
         if lead_end > lead_start + 1
-          alts << compile_seq([(lead_start + 1)...lead_end, 0x80..0xBF])
+          yield [(lead_start + 1)..lead_end - 1, 0x80..0xBF]
         end
-
-        cont_end = 0x80 | (end_codepoint & 0x3F)
-        alts << compile_seq([lead_end, 0x80..cont_end])
-        compile_alts(alts)
+        yield [lead_end, 0x80..(0x80 | (end_codepoint & 0x3F))]
       end
     end
 
-    def compile_range_3(start_codepoint, end_codepoint)
+    def range_3_sequences(start_codepoint, end_codepoint)
       lead_start = 0xE0 | (start_codepoint >> 12)
       lead_end = 0xE0 | (end_codepoint >> 12)
 
       if lead_start == lead_end
-        compile_3byte_single_lead(lead_start, start_codepoint, end_codepoint)
+        single_lead_3_sequences(lead_start, start_codepoint, end_codepoint) { |s| yield s }
       else
-        alts = []
-
-        codepoint_min = start_codepoint
         codepoint_max = [end_codepoint, ((lead_start & 0x0F) << 12) + 0xFFF].min
-        alts << compile_3byte_single_lead(lead_start, codepoint_min, codepoint_max)
-
+        single_lead_3_sequences(lead_start, start_codepoint, codepoint_max) { |s| yield s }
         if lead_end > lead_start + 1
-          alts << compile_seq([(lead_start + 1)...lead_end, 0x80..0xBF, 0x80..0xBF])
+          yield [(lead_start + 1)..lead_end - 1, 0x80..0xBF, 0x80..0xBF]
         end
-
         codepoint_min = [start_codepoint, ((lead_end & 0x0F) << 12)].max
-        codepoint_max = end_codepoint
-        alts << compile_3byte_single_lead(lead_end, codepoint_min, codepoint_max)
-
-        compile_alts(alts)
+        single_lead_3_sequences(lead_end, codepoint_min, end_codepoint) { |s| yield s }
       end
     end
 
-    def compile_3byte_single_lead(lead, start_codepoint, end_codepoint)
-      second_start = 0x80 | ((start_codepoint >> 6) & 0x3F)
-      second_end = 0x80 | ((end_codepoint >> 6) & 0x3F)
+    def single_lead_3_sequences(lead, start_codepoint, end_codepoint)
+      s2s = 0x80 | ((start_codepoint >> 6) & 0x3F)
+      s2e = 0x80 | ((end_codepoint >> 6) & 0x3F)
 
-      if second_start == second_end
-        third_start = 0x80 | (start_codepoint & 0x3F)
-        third_end = 0x80 | (end_codepoint & 0x3F)
-
-        compile_seq([lead, second_start, third_start..third_end])
+      if s2s == s2e
+        yield [lead, s2s, (0x80 | (start_codepoint & 0x3F))..(0x80 | (end_codepoint & 0x3F))]
       else
-        alts = []
-
-        third_start = 0x80 | (start_codepoint & 0x3F)
-        alts << compile_seq([lead, second_start, third_start..0xBF])
-
-        if second_end > second_start + 1
-          alts << compile_seq([lead, (second_start + 1)...second_end, 0x80..0xBF])
-        end
-
-        third_end = 0x80 | (end_codepoint & 0x3F)
-        alts << compile_seq([lead, second_end, 0x80..third_end])
-        compile_alts(alts)
+        yield [lead, s2s, (0x80 | (start_codepoint & 0x3F))..0xBF]
+        yield [lead, (s2s + 1)..s2e - 1, 0x80..0xBF] if s2e > s2s + 1
+        yield [lead, s2e, 0x80..(0x80 | (end_codepoint & 0x3F))]
       end
     end
 
-    def compile_range_4(start_codepoint, end_codepoint)
+    def range_4_sequences(start_codepoint, end_codepoint)
       lead_start = 0xF0 | (start_codepoint >> 18)
       lead_end = 0xF0 | (end_codepoint >> 18)
 
       if lead_start == lead_end
-        compile_4byte_single_lead(lead_start, start_codepoint, end_codepoint)
+        single_lead_4_sequences(lead_start, start_codepoint, end_codepoint) { |s| yield s }
       else
-        alts = []
-
-        codepoint_min = start_codepoint
         codepoint_max = [end_codepoint, ((lead_start & 0x07) << 18) + 0x3FFFF].min
-        alts << compile_4byte_single_lead(lead_start, codepoint_min, codepoint_max)
-
+        single_lead_4_sequences(lead_start, start_codepoint, codepoint_max) { |s| yield s }
         if lead_end > lead_start + 1
-          alts << compile_seq([(lead_start + 1)...lead_end, 0x80..0xBF, 0x80..0xBF, 0x80..0xBF])
+          yield [(lead_start + 1)..lead_end - 1, 0x80..0xBF, 0x80..0xBF, 0x80..0xBF]
         end
-
         codepoint_min = [start_codepoint, ((lead_end & 0x07) << 18)].max
-        codepoint_max = end_codepoint
-        alts << compile_4byte_single_lead(lead_end, codepoint_min, codepoint_max)
-
-        compile_alts(alts)
+        single_lead_4_sequences(lead_end, codepoint_min, end_codepoint) { |s| yield s }
       end
     end
 
-    def compile_4byte_single_lead(lead, start_codepoint, end_codepoint)
-      second_start = 0x80 | ((start_codepoint >> 12) & 0x3F)
-      second_end = 0x80 | ((end_codepoint >> 12) & 0x3F)
+    def single_lead_4_sequences(lead, start_codepoint, end_codepoint)
+      s2s = 0x80 | ((start_codepoint >> 12) & 0x3F)
+      s2e = 0x80 | ((end_codepoint >> 12) & 0x3F)
 
-      if second_start == second_end
-        compile_4byte_single_second(lead, second_start, start_codepoint, end_codepoint)
+      if s2s == s2e
+        single_second_4_sequences(lead, s2s, start_codepoint, end_codepoint) { |s| yield s }
       else
-        alts = []
-
-        alts << compile_4byte_single_second(lead, second_start, start_codepoint, [end_codepoint, ((start_codepoint >> 12) << 12) + 0xFFF].min)
-        if second_end > second_start + 1
-          alts << compile_seq([lead, (second_start + 1)...second_end, 0x80..0xBF, 0x80..0xBF])
+        codepoint_max = [end_codepoint, ((start_codepoint >> 12) << 12) + 0xFFF].min
+        single_second_4_sequences(lead, s2s, start_codepoint, codepoint_max) { |s| yield s }
+        if s2e > s2s + 1
+          yield [lead, (s2s + 1)..s2e - 1, 0x80..0xBF, 0x80..0xBF]
         end
-
-        alts << compile_4byte_single_second(lead, second_end, [start_codepoint, ((end_codepoint >> 12) << 12)].max, end_codepoint)
-
-        compile_alts(alts)
+        codepoint_min = [start_codepoint, ((end_codepoint >> 12) << 12)].max
+        single_second_4_sequences(lead, s2e, codepoint_min, end_codepoint) { |s| yield s }
       end
     end
 
-    def compile_4byte_single_second(lead, second, start_codepoint, end_codepoint)
-      third_start = 0x80 | ((start_codepoint >> 6) & 0x3F)
-      third_end = 0x80 | ((end_codepoint >> 6) & 0x3F)
+    def single_second_4_sequences(lead, second, start_codepoint, end_codepoint)
+      s3s = 0x80 | ((start_codepoint >> 6) & 0x3F)
+      s3e = 0x80 | ((end_codepoint >> 6) & 0x3F)
 
-      if third_start == third_end
-        fourth_start = 0x80 | (start_codepoint & 0x3F)
-        fourth_end = 0x80 | (end_codepoint & 0x3F)
-
-        compile_seq([lead, second, third_start, fourth_start..fourth_end])
+      if s3s == s3e
+        yield [lead, second, s3s, (0x80 | (start_codepoint & 0x3F))..(0x80 | (end_codepoint & 0x3F))]
       else
-        alts = []
-
-        fourth_start = 0x80 | (start_codepoint & 0x3F)
-        alts << compile_seq([lead, second, third_start, fourth_start..0xBF])
-
-        if third_end > third_start + 1
-          alts << compile_seq([lead, second, (third_start + 1)...third_end, 0x80..0xBF])
-        end
-
-        fourth_end = 0x80 | (end_codepoint & 0x3F)
-        alts << compile_seq([lead, second, third_end, 0x80..fourth_end])
-        compile_alts(alts)
+        yield [lead, second, s3s, (0x80 | (start_codepoint & 0x3F))..0xBF]
+        yield [lead, second, (s3s + 1)..s3e - 1, 0x80..0xBF] if s3e > s3s + 1
+        yield [lead, second, s3e, 0x80..(0x80 | (end_codepoint & 0x3F))]
       end
     end
+
   end
 
   # Base class for UTF-16 encodings (little-endian and big-endian)
@@ -1496,88 +1556,61 @@ module Exreg
     end
 
     def compile_set_encoded(unicode_set)
-      frags = []
+      trie = {}
 
       unicode_set.each_range do |range|
         start_codepoint = range.begin
         end_codepoint = range.end - 1
         next if start_codepoint > end_codepoint
 
-        # Split range into BMP (U+0000-U+D7FF and U+E000-U+FFFF) and supplementary (U+10000-U+10FFFF)
-        # Note: U+D800-U+DFFF are surrogate codepoints and invalid as scalar values
-
-        alts = []
-
+        # Split range into BMP (skip surrogates) and supplementary sub-ranges
         # BMP before surrogates: U+0000-U+D7FF
         bmp1_start = [start_codepoint, 0x0000].max
         bmp1_end = [end_codepoint, 0xD7FF].min
+        if bmp1_start <= bmp1_end
+          bmp_sequences(bmp1_start, bmp1_end) { |seq| trie_insert(trie, seq, 0) }
+        end
 
         # BMP after surrogates: U+E000-U+FFFF
         bmp2_start = [start_codepoint, 0xE000].max
         bmp2_end = [end_codepoint, 0xFFFF].min
+        if bmp2_start <= bmp2_end
+          bmp_sequences(bmp2_start, bmp2_end) { |seq| trie_insert(trie, seq, 0) }
+        end
 
         # Supplementary: U+10000-U+10FFFF
         supp_start = [start_codepoint, 0x10000].max
         supp_end = [end_codepoint, 0x10FFFF].min
-
-        # Handle BMP range before surrogates
-        if bmp1_start <= bmp1_end
-          alts << compile_bmp_range(bmp1_start, bmp1_end)
-        end
-
-        # Handle BMP range after surrogates
-        if bmp2_start <= bmp2_end
-          alts << compile_bmp_range(bmp2_start, bmp2_end)
-        end
-
-        # Handle supplementary range (4-byte surrogate pairs)
         if supp_start <= supp_end
-          alts << compile_surrogate_range(supp_start, supp_end)
+          surrogate_sequences(supp_start, supp_end) { |seq| trie_insert(trie, seq, 0) }
         end
-
-        frags << compile_alts(alts)
       end
 
-      raise InternalError, "Empty character set" if frags.empty?
-      compile_alts(frags)
+      raise InternalError, "Empty character set" if trie.empty?
+      compile_trie(trie)
     end
 
-    # Compile BMP codepoints (U+0000-U+FFFF) as 2-byte sequences
-    def compile_bmp_range(start_codepoint, end_codepoint)
-      # Extract logical bytes (byte0=LSB, byte1=MSB) for start and end
-      byte0_start = start_codepoint & 0xFF
-      byte0_end = end_codepoint & 0xFF
+    # Yield 2-element stream-ordered byte sequences for BMP codepoints.
+    # Splits at byte1 (MSB) boundaries.
+    def bmp_sequences(start_codepoint, end_codepoint)
       byte1_start = (start_codepoint >> 8) & 0xFF
       byte1_end = (end_codepoint >> 8) & 0xFF
 
       if byte1_start == byte1_end
-        # Only byte0 varies
-        compile_seq(stream_order([byte0_start..byte0_end, byte1_start]))
+        yield stream_order([(start_codepoint & 0xFF)..(end_codepoint & 0xFF), byte1_start])
       else
-        alts = []
-
-        # First: byte0_start..0xFF, byte1_start
-        alts << compile_seq(stream_order([byte0_start..0xFF, byte1_start]))
-
-        # Middle: 0..0xFF, (byte1_start+1)...(byte1_end)
+        yield stream_order([(start_codepoint & 0xFF)..0xFF, byte1_start])
         if byte1_end > byte1_start + 1
-          alts << compile_seq(stream_order([0..0xFF, (byte1_start + 1)...byte1_end]))
+          yield stream_order([0..0xFF, (byte1_start + 1)..(byte1_end - 1)])
         end
-
-        # Last: 0..byte0_end, byte1_end
-        alts << compile_seq(stream_order([0..byte0_end, byte1_end]))
-
-        compile_alts(alts)
+        yield stream_order([0..(end_codepoint & 0xFF), byte1_end])
       end
     end
 
-    # Compile supplementary codepoints (U+10000-U+10FFFF) as 4-byte surrogate pairs
-    # High surrogate: 0xD800 + ((codepoint - 0x10000) >> 10)
-    # Low surrogate: 0xDC00 + ((codepoint - 0x10000) & 0x3FF)
-    def compile_surrogate_range(start_codepoint, end_codepoint)
-      alts = []
-
-      # Convert codepoints to surrogate pair components
+    # Yield 4-element stream-ordered byte sequences for supplementary codepoints
+    # encoded as surrogate pairs. Splits at high surrogate boundaries, then
+    # decomposes each surrogate into 2 bytes via bmp_sequences logic.
+    def surrogate_sequences(start_codepoint, end_codepoint)
       start_offset = start_codepoint - 0x10000
       end_offset = end_codepoint - 0x10000
 
@@ -1587,42 +1620,31 @@ module Exreg
       low_end = 0xDC00 + (end_offset & 0x3FF)
 
       if high_start == high_end
-        # Same high surrogate, only low surrogate varies
-        alts << compile_surrogate_pair_range(high_start, high_start, low_start, low_end)
+        surrogate_pair_sequences(high_start, high_start, low_start, low_end) { |seq| yield seq }
       else
-        # First: high_start with low_start..0xDFFF
-        alts << compile_surrogate_pair_range(high_start, high_start, low_start, 0xDFFF)
-
-        # Middle: (high_start+1)...(high_end) with 0xDC00..0xDFFF
+        surrogate_pair_sequences(high_start, high_start, low_start, 0xDFFF) { |seq| yield seq }
         if high_end > high_start + 1
-          alts << compile_surrogate_pair_range(high_start + 1, high_end - 1, 0xDC00, 0xDFFF)
+          surrogate_pair_sequences(high_start + 1, high_end - 1, 0xDC00, 0xDFFF) { |seq| yield seq }
         end
-
-        # Last: high_end with 0xDC00..low_end
-        alts << compile_surrogate_pair_range(high_end, high_end, 0xDC00, low_end)
+        surrogate_pair_sequences(high_end, high_end, 0xDC00, low_end) { |seq| yield seq }
       end
-
-      compile_alts(alts)
     end
 
-    # Compile a range of surrogate pairs where high surrogate is in [high_start, high_end]
-    # and low surrogate is in [low_start, low_end]
-    def compile_surrogate_pair_range(high_start, high_end, low_start, low_end)
-      high_frag = if high_start == high_end
-        compile_bmp_range(high_start, high_start)
-      else
-        compile_bmp_range(high_start, high_end)
-      end
+    # Yield 4-element stream-ordered byte sequences for a surrogate pair range.
+    # Each surrogate (16-bit) is split into 2 bytes in stream order, then
+    # concatenated: [high_b0, high_b1, low_b0, low_b1].
+    def surrogate_pair_sequences(high_start, high_end, low_start, low_end)
+      high_seqs = []
+      bmp_sequences(high_start, high_end) { |seq| high_seqs << seq }
 
-      low_frag = if low_start == low_end
-        compile_bmp_range(low_start, low_start)
-      else
-        compile_bmp_range(low_start, low_end)
-      end
+      low_seqs = []
+      bmp_sequences(low_start, low_end) { |seq| low_seqs << seq }
 
-      # Concatenate high and low surrogate fragments
-      patch_insns(high_frag[1], low_frag[0])
-      [high_frag[0], low_frag[1]]
+      high_seqs.each do |high_seq|
+        low_seqs.each do |low_seq|
+          yield high_seq + low_seq
+        end
+      end
     end
   end
 
@@ -1650,139 +1672,72 @@ module Exreg
     end
 
     def compile_set_encoded(unicode_set)
-      frags = []
+      trie = {}
 
       unicode_set.each_range do |range|
         start_codepoint = range.begin
         end_codepoint = range.end - 1
         next if start_codepoint > end_codepoint
 
-        # Extract logical bytes (byte0=LSB, byte3=MSB) for start and end codepoints
-        byte0_start = start_codepoint & 0xFF
-        byte0_end = end_codepoint & 0xFF
-        byte1_start = (start_codepoint >> 8) & 0xFF
-        byte1_end = (end_codepoint >> 8) & 0xFF
-        byte2_start = (start_codepoint >> 16) & 0xFF
-        byte2_end = (end_codepoint >> 16) & 0xFF
-        byte3_start = (start_codepoint >> 24) & 0xFF
-        byte3_end = (end_codepoint >> 24) & 0xFF
-
-        if byte3_start == byte3_end && byte2_start == byte2_end && byte1_start == byte1_end
-          # All bytes except byte0 are the same
-          frags << compile_seq(stream_order([byte0_start..byte0_end, byte1_start, byte2_start, byte3_start]))
-        elsif byte3_start == byte3_end && byte2_start == byte2_end
-          # Bytes 2 and 3 are the same, bytes 0 and 1 vary
-          alts = []
-
-          if byte1_start == byte1_end
-            # Only byte0 varies
-            alts << compile_seq(stream_order([byte0_start..byte0_end, byte1_start, byte2_start, byte3_start]))
-          else
-            # First sequence: byte0_start..0xFF, byte1_start
-            alts << compile_seq(stream_order([byte0_start..0xFF, byte1_start, byte2_start, byte3_start]))
-
-            # Middle sequences: 0..0xFF, (byte1_start+1)...(byte1_end)
-            if byte1_end > byte1_start + 1
-              alts << compile_seq(stream_order([0..0xFF, (byte1_start + 1)...byte1_end, byte2_start, byte3_start]))
-            end
-
-            # Last sequence: 0..byte0_end, byte1_end
-            alts << compile_seq(stream_order([0..byte0_end, byte1_end, byte2_start, byte3_start]))
-          end
-
-          frags << compile_alts(alts)
-        elsif byte3_start == byte3_end
-          # Byte 3 is the same, bytes 0-2 vary
-          alts = []
-
-          # First: handle start_codepoint to end of its byte2 range
-          codepoint_max = [end_codepoint, ((byte2_start << 16) | 0xFFFF)].min
-          alts << compile_utf32_byte2_range(byte2_start, byte3_start, start_codepoint, codepoint_max)
-
-          # Middle: full byte2 ranges
-          if byte2_end > byte2_start + 1
-            alts << compile_seq(stream_order([0..0xFF, 0..0xFF, (byte2_start + 1)...byte2_end, byte3_start]))
-          end
-
-          # Last: beginning of byte2_end range to end_codepoint
-          codepoint_min = [start_codepoint, (byte2_end << 16)].max
-          alts << compile_utf32_byte2_range(byte2_end, byte3_start, codepoint_min, end_codepoint)
-
-          frags << compile_alts(alts)
-        else
-          # Byte 3 varies (most complex case)
-          alts = []
-
-          # First: handle start_codepoint to end of its byte3 range
-          codepoint_max = [end_codepoint, ((byte3_start << 24) | 0xFFFFFF)].min
-          alts << compile_utf32_byte3_range(byte3_start, start_codepoint, codepoint_max)
-
-          # Middle: full byte3 ranges
-          if byte3_end > byte3_start + 1
-            alts << compile_seq(stream_order([0..0xFF, 0..0xFF, 0..0xFF, (byte3_start + 1)...byte3_end]))
-          end
-
-          # Last: beginning of byte3_end range to end_codepoint
-          codepoint_min = [start_codepoint, (byte3_end << 24)].max
-          alts << compile_utf32_byte3_range(byte3_end, codepoint_min, end_codepoint)
-
-          frags << compile_alts(alts)
-        end
+        utf32_sequences(start_codepoint, end_codepoint) { |seq| trie_insert(trie, seq, 0) }
       end
 
-      raise InternalError, "Empty character set" if frags.empty?
-      compile_alts(frags)
+      raise InternalError, "Empty character set" if trie.empty?
+      compile_trie(trie)
     end
 
-    def compile_utf32_byte2_range(byte2, byte3, start_codepoint, end_codepoint)
-      byte0_start = start_codepoint & 0xFF
-      byte0_end = end_codepoint & 0xFF
-      byte1_start = (start_codepoint >> 8) & 0xFF
-      byte1_end = (end_codepoint >> 8) & 0xFF
+    # Yield 4-element stream-ordered byte sequences for a codepoint range.
+    # Splits at byte3 (MSB) boundaries, delegates to byte2 splitting.
+    def utf32_sequences(start_codepoint, end_codepoint)
+      byte3_start = (start_codepoint >> 24) & 0xFF
+      byte3_end = (end_codepoint >> 24) & 0xFF
 
-      if byte1_start == byte1_end
-        compile_seq(stream_order([byte0_start..byte0_end, byte1_start, byte2, byte3]))
+      if byte3_start == byte3_end
+        utf32_byte3_sequences(byte3_start, start_codepoint, end_codepoint) { |seq| yield seq }
       else
-        alts = []
-
-        # First: byte0_start..0xFF, byte1_start
-        alts << compile_seq(stream_order([byte0_start..0xFF, byte1_start, byte2, byte3]))
-
-        # Middle: 0..0xFF, (byte1_start+1)...(byte1_end)
-        if byte1_end > byte1_start + 1
-          alts << compile_seq(stream_order([0..0xFF, (byte1_start + 1)...byte1_end, byte2, byte3]))
+        codepoint_max = [end_codepoint, ((byte3_start << 24) | 0xFFFFFF)].min
+        utf32_byte3_sequences(byte3_start, start_codepoint, codepoint_max) { |seq| yield seq }
+        if byte3_end > byte3_start + 1
+          yield stream_order([0..0xFF, 0..0xFF, 0..0xFF, (byte3_start + 1)..(byte3_end - 1)])
         end
-
-        # Last: 0..byte0_end, byte1_end
-        alts << compile_seq(stream_order([0..byte0_end, byte1_end, byte2, byte3]))
-
-        compile_alts(alts)
+        codepoint_min = [start_codepoint, (byte3_end << 24)].max
+        utf32_byte3_sequences(byte3_end, codepoint_min, end_codepoint) { |seq| yield seq }
       end
     end
 
-    def compile_utf32_byte3_range(byte3, start_codepoint, end_codepoint)
+    # Yield 4-element stream-ordered byte sequences within a single byte3 value.
+    # Splits at byte2 boundaries, delegates to byte1 splitting.
+    def utf32_byte3_sequences(byte3, start_codepoint, end_codepoint)
       byte2_start = (start_codepoint >> 16) & 0xFF
       byte2_end = (end_codepoint >> 16) & 0xFF
 
       if byte2_start == byte2_end
-        compile_utf32_byte2_range(byte2_start, byte3, start_codepoint, end_codepoint)
+        utf32_byte2_sequences(byte2_start, byte3, start_codepoint, end_codepoint) { |seq| yield seq }
       else
-        alts = []
-
-        # First: handle start_codepoint to end of its byte2 range
         codepoint_max = [end_codepoint, ((byte2_start << 16) | 0xFFFF)].min
-        alts << compile_utf32_byte2_range(byte2_start, byte3, start_codepoint, codepoint_max)
-
-        # Middle: full byte2 ranges
+        utf32_byte2_sequences(byte2_start, byte3, start_codepoint, codepoint_max) { |seq| yield seq }
         if byte2_end > byte2_start + 1
-          alts << compile_seq(stream_order([0..0xFF, 0..0xFF, (byte2_start + 1)...byte2_end, byte3]))
+          yield stream_order([0..0xFF, 0..0xFF, (byte2_start + 1)..(byte2_end - 1), byte3])
         end
-
-        # Last: beginning of byte2_end range to end_codepoint
         codepoint_min = [start_codepoint, (byte2_end << 16)].max
-        alts << compile_utf32_byte2_range(byte2_end, byte3, codepoint_min, end_codepoint)
+        utf32_byte2_sequences(byte2_end, byte3, codepoint_min, end_codepoint) { |seq| yield seq }
+      end
+    end
 
-        compile_alts(alts)
+    # Yield 4-element stream-ordered byte sequences within a single byte2 and
+    # byte3 value. Splits at byte1 boundaries.
+    def utf32_byte2_sequences(byte2, byte3, start_codepoint, end_codepoint)
+      byte1_start = (start_codepoint >> 8) & 0xFF
+      byte1_end = (end_codepoint >> 8) & 0xFF
+
+      if byte1_start == byte1_end
+        yield stream_order([(start_codepoint & 0xFF)..(end_codepoint & 0xFF), byte1_start, byte2, byte3])
+      else
+        yield stream_order([(start_codepoint & 0xFF)..0xFF, byte1_start, byte2, byte3])
+        if byte1_end > byte1_start + 1
+          yield stream_order([0..0xFF, (byte1_start + 1)..(byte1_end - 1), byte2, byte3])
+        end
+        yield stream_order([0..(end_codepoint & 0xFF), byte1_end, byte2, byte3])
       end
     end
   end
